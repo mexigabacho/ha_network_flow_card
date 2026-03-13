@@ -312,57 +312,19 @@ class NetworkFlowRenderer {
 
   _spawnParticles() {
     this._particles = [];
-
-    // Animation tuning constants
-    const MAX_PARTICLES  = 8;    // max dots per direction per link at 100% utilization
-    const BASE_SPEED     = 0.002; // travel speed at near-zero utilization (~very slow)
-    const MAX_SPEED      = 0.009; // travel speed at 100% utilization (~fast)
-    const SPEED_JITTER   = 0.0008;// small random variation per particle so they don't clump
-
     for (const lk of (this._config.links || [])) {
       const fn = this._nodeById(lk.from), tn = this._nodeById(lk.to);
       if (!fn || !tn) continue;
       const fs = this._nodeStatus(fn), ts = this._nodeStatus(tn);
       if (fs === "offline" || ts === "offline") continue;
       const standby = fs === "standby" || ts === "standby";
-      if (standby) continue; // no particles on standby links
-
       const { up, dn } = resolveLinkSpeeds(fn, tn, this._states);
-
-      // Per-link capacity ceiling from config, falls back to card-level default,
-      // then to a sensible default of 1000 Mbps (gigabit)
-      const maxUp = lk.max_upload   ?? lk.max_speed ?? this._config.max_speed ?? 1000;
-      const maxDn = lk.max_download ?? lk.max_speed ?? this._config.max_speed ?? 1000;
-
-      // Utilization ratio clamped 0–1
-      // If speed is 0 or not available → no particles (user chose this)
-      const utilUp = (up  > 0 && maxUp > 0) ? Math.min(up  / maxUp, 1) : 0;
-      const utilDn = (dn  > 0 && maxDn > 0) ? Math.min(dn  / maxDn, 1) : 0;
-
-      // Density: number of particles scales linearly with utilization
-      // utilization=0 → 0 particles, utilization=1 → MAX_PARTICLES
-      const countUp = Math.round(utilUp * MAX_PARTICLES);
-      const countDn = Math.round(utilDn * MAX_PARTICLES);
-
-      // Velocity: lerp between BASE_SPEED and MAX_SPEED based on utilization
-      // Higher speed → dots travel faster → feels more urgent/active
-      const velUp = BASE_SPEED + (MAX_SPEED - BASE_SPEED) * utilUp;
-      const velDn = BASE_SPEED + (MAX_SPEED - BASE_SPEED) * utilDn;
-
-      for (let i = 0; i < countUp; i++) {
-        this._particles.push({
-          from: lk.from, to: lk.to, dir: "up",
-          t:     Math.random(),
-          speed: velUp + (Math.random() - 0.5) * SPEED_JITTER,
-        });
-      }
-      for (let i = 0; i < countDn; i++) {
-        this._particles.push({
-          from: lk.from, to: lk.to, dir: "dn",
-          t:     Math.random(),
-          speed: velDn + (Math.random() - 0.5) * SPEED_JITTER,
-        });
-      }
+      const uc = standby ? 0 : Math.max(1, Math.round(up / 200 * 5));
+      const dc = standby ? 0 : Math.max(1, Math.round(dn / 200 * 5));
+      for (let i = 0; i < uc; i++)
+        this._particles.push({ from: lk.from, to: lk.to, dir: "up", t: Math.random(), speed: 0.003 + Math.random() * 0.003, standby });
+      for (let i = 0; i < dc; i++)
+        this._particles.push({ from: lk.from, to: lk.to, dir: "dn", t: Math.random(), speed: 0.003 + Math.random() * 0.003, standby });
     }
   }
 
@@ -925,12 +887,6 @@ class NetworkFlowCardEditor extends HTMLElement {
     <div class="hint-text">Where to show IP, ping, clients, and secondary status relative to each node box.
       Can be overridden per node.</div>
 
-    <div class="sec">Animation</div>
-    <ha-textfield id="f-max-speed" label="Default link capacity (Mbps)" type="number"
-                  min="1" style="width:100%;display:block;margin-bottom:4px"></ha-textfield>
-    <div class="hint-text">Sets the 100% utilization ceiling for particle density and velocity.
-      Override per-link with max_speed, max_upload, max_download.</div>
-
     <div class="sec">Theme colors</div>
     <div id="theme-colors"></div>
     <div class="sec">Nodes<button class="sec-btn" id="btn-add-node">+ Add node</button></div>
@@ -964,19 +920,6 @@ class NetworkFlowCardEditor extends HTMLElement {
       this._config.meta_position || "below",
       val => { this._config = { ...this._config, meta_position: val }; this._fireChange(); }
     ));
-
-    // Card-level max_speed
-    const maxSpeedEl = sr.getElementById("f-max-speed");
-    if (maxSpeedEl) {
-      maxSpeedEl.value = this._config.max_speed || 1000;
-      maxSpeedEl.addEventListener("change", e => {
-        const v = parseFloat(e.target.value);
-        if (!isNaN(v) && v > 0) {
-          this._config = { ...this._config, max_speed: v };
-          this._fireChange();
-        }
-      });
-    }
 
     // Active WAN entity picker
     const activeWanPicker = sr.getElementById("f-active-wan");
@@ -1048,12 +991,6 @@ class NetworkFlowCardEditor extends HTMLElement {
     if (mpSel) {
       const v = this._config.meta_position || "below";
       if (mpSel.value !== v) mpSel.value = v;
-    }
-
-    const msEl = sr.getElementById("f-max-speed");
-    if (msEl && active !== msEl) {
-      const v = String(this._config.max_speed || 1000);
-      if (msEl.value !== v) msEl.value = v;
     }
 
     // ha-selector entity pickers — compare before writing
@@ -1436,32 +1373,6 @@ class NetworkFlowCardEditor extends HTMLElement {
       });
       row.appendChild(db);
       wrap.appendChild(row);
-
-      // Capacity fields — control particle density + velocity scaling
-      const capRow = document.createElement("div");
-      capRow.style.cssText = "display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:6px";
-      const capFields = [
-        { key: "max_speed",    label: "Max speed (Mbps)",    hint: "Both up+dn" },
-        { key: "max_upload",   label: "Max upload (Mbps)",   hint: "Override up" },
-        { key: "max_download", label: "Max download (Mbps)", hint: "Override dn" },
-      ];
-      capFields.forEach(cf => {
-        const tf = document.createElement("ha-textfield");
-        tf.label = cf.label; tf.type = "number"; tf.min = "1";
-        tf.placeholder = cf.hint;
-        tf.value = lk[cf.key] || "";
-        tf.style.width = "100%";
-        tf.addEventListener("change", e => {
-          const v = parseFloat(e.target.value);
-          const links2 = [...this._config.links];
-          if (!isNaN(v) && v > 0) links2[idx] = { ...links2[idx], [cf.key]: v };
-          else { links2[idx] = { ...links2[idx] }; delete links2[idx][cf.key]; }
-          this._config = { ...this._config, links: links2 };
-          this._fireChange();
-        });
-        capRow.appendChild(tf);
-      });
-      wrap.appendChild(capRow);
       container.appendChild(wrap);
     });
   }
