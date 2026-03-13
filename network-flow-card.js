@@ -114,6 +114,53 @@ function resolveNodeState(hass, node) {
   return result;
 }
 
+// ─── Speed resolution ────────────────────────────────────────────────────────
+// For a link A→B, the "speed node" is whichever end actually has speed data.
+// Priority:
+//   1. The non-router end, if it has speed data
+//   2. Either end that has speed data
+//   3. No data — return {up:0, dn:0}
+// This correctly handles:
+//   wan1 → router  : speeds from wan1 (ISP node)
+//   router → lan   : speeds from lan  (interface node)
+//   router → wifi5 : speeds from wifi5
+
+function resolveLinkSpeeds(fromNode, toNode, states) {
+  const fst = states[fromNode.id] || {};
+  const tst = states[toNode.id]   || {};
+
+  // Does each end have any speed data (entity state or mock data)?
+  const fUp = parseFloat(fst.upload   ?? fromNode.data?.upload   ?? NaN);
+  const fDn = parseFloat(fst.download ?? fromNode.data?.download ?? NaN);
+  const tUp = parseFloat(tst.upload   ?? toNode.data?.upload     ?? NaN);
+  const tDn = parseFloat(tst.download ?? toNode.data?.download   ?? NaN);
+
+  const fromHasData = !isNaN(fUp) || !isNaN(fDn);
+  const toHasData   = !isNaN(tUp) || !isNaN(tDn);
+
+  // Prefer the non-router end
+  const fromIsRouter = fromNode.type === "router";
+  const toIsRouter   = toNode.type   === "router";
+
+  let speedNode, speedState, speedDef;
+  if (!fromIsRouter && fromHasData) {
+    speedNode = fromNode; speedState = fst;
+  } else if (!toIsRouter && toHasData) {
+    speedNode = toNode;   speedState = tst;
+  } else if (fromHasData) {
+    speedNode = fromNode; speedState = fst;
+  } else if (toHasData) {
+    speedNode = toNode;   speedState = tst;
+  } else {
+    return { up: 0, dn: 0 };
+  }
+
+  return {
+    up: parseFloat(speedState.upload   ?? speedNode.data?.upload   ?? 0) || 0,
+    dn: parseFloat(speedState.download ?? speedNode.data?.download ?? 0) || 0,
+  };
+}
+
 // ─── Canvas Renderer ──────────────────────────────────────────────────────────
 
 const NODE_W = 88, NODE_H = 72, RX = 10;
@@ -194,8 +241,7 @@ class NetworkFlowRenderer {
       const fs = this._nodeStatus(fn), ts = this._nodeStatus(tn);
       if (fs === "offline" || ts === "offline") continue;
       const standby = fs === "standby" || ts === "standby";
-      const up = parseFloat(this._states[fn.id]?.upload ?? fn.data?.upload ?? 0) || 0;
-      const dn = parseFloat(this._states[tn.id]?.download ?? tn.data?.download ?? 0) || 0;
+      const { up, dn } = resolveLinkSpeeds(fn, tn, this._states);
       const uc = standby ? 0 : Math.max(1, Math.round(up / 200 * 5));
       const dc = standby ? 0 : Math.max(1, Math.round(dn / 200 * 5));
       for (let i = 0; i < uc; i++) this._particles.push({ from: lk.from, to: lk.to, dir: "up", t: Math.random(), speed: 0.003 + Math.random() * 0.003, standby });
@@ -253,10 +299,7 @@ class NetworkFlowRenderer {
         ctx.globalAlpha = 0.6; ctx.fillStyle = this._dark ? "#c78a36" : "#92400e";
         ctx.fillText("standby", mx + ox, my + oy);
       } else {
-        const iface = this._nodeById(lk.to) || this._nodeById(lk.from);
-        const st = this._states[iface?.id] || {};
-        const up = parseFloat(st.upload ?? iface?.data?.upload ?? 0) || 0;
-        const dn = parseFloat(st.download ?? iface?.data?.download ?? 0) || 0;
+        const { up, dn } = resolveLinkSpeeds(fn, tn, this._states);
         ctx.globalAlpha = 0.9;
         ctx.fillStyle = this._theme.upload; ctx.fillText("↑" + this._fmtSpd(up), mx + ox, my + oy - 7);
         ctx.fillStyle = this._theme.download; ctx.fillText("↓" + this._fmtSpd(dn), mx + ox, my + oy + 7);
