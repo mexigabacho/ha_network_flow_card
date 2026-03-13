@@ -265,8 +265,10 @@ class NetworkFlowRenderer {
     this._layout();
   }
 
-  start()               { this._spawnParticles(); this._loop(); }
+  start()               { this._paused = false; this._spawnParticles(); this._loop(); }
   stop()                { if (this._rafId) cancelAnimationFrame(this._rafId); this._ro.disconnect(); }
+  pause()               { this._paused = true; if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; } }
+  resume()              { if (this._paused) { this._paused = false; this._loop(); } }
   setConfig(cfg, theme) {
     this._config = cfg;
     this._theme = theme;
@@ -328,7 +330,10 @@ class NetworkFlowRenderer {
     }
   }
 
-  _loop() { this._rafId = requestAnimationFrame(() => { this._draw(); this._loop(); }); }
+  _loop() {
+    if (this._paused) return;
+    this._rafId = requestAnimationFrame(() => { this._draw(); this._loop(); });
+  }
 
   _draw() {
     this._resolveThemeColors();
@@ -336,6 +341,19 @@ class NetworkFlowRenderer {
     ctx.clearRect(0, 0, this._W, this._H);
     this._drawLinks();
     this._advanceParticles();
+    this._drawLinkLabels();
+    this._config.nodes.forEach(n => this._drawNode(n));
+    this._updateTs();
+  }
+
+  // Draw a single static frame without scheduling the next animation frame.
+  // Used when paused (edit mode) so the topology is still visible.
+  drawStatic() {
+    this._resolveThemeColors();
+    const ctx = this._ctx;
+    ctx.clearRect(0, 0, this._W, this._H);
+    this._drawLinks();
+    // No particles in static frame — cleaner for editing
     this._drawLinkLabels();
     this._config.nodes.forEach(n => this._drawNode(n));
     this._updateTs();
@@ -1512,6 +1530,22 @@ class NetworkFlowCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._syncStates();
+  }
+
+  // HA sets editMode=true when the card editor panel is open,
+  // and editMode=false (or calls with false) when it closes.
+  // We pause the canvas animation loop while editing to reduce
+  // CPU load and improve editor responsiveness.
+  set editMode(editing) {
+    this._editMode = editing;
+    if (!this._renderer) return;
+    if (editing) {
+      this._renderer.pause();
+      // Draw one static frame so the card still shows the topology
+      this._renderer.drawStatic();
+    } else {
+      this._renderer.resume();
+    }
   }
 
   _syncStates() {
