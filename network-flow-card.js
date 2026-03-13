@@ -826,7 +826,7 @@ class NetworkFlowCardEditor extends HTMLElement {
       avLabel.style.cssText = "font-size:11px;color:var(--secondary-text-color);margin-bottom:6px;line-height:1.4";
       avLabel.textContent = "Active WAN value — what the active_wan sensor returns when this node is the active connection";
       const avField = document.createElement("ha-textfield");
-      avField.label = "Active value (e.g. "primary", "backup")";
+      avField.label = "Active value (e.g. primary or backup)";
       avField.value = node.active_value || "";
       avField.style.width = "100%";
       avField.addEventListener("input", e => {
