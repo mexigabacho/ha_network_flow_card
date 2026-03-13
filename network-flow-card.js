@@ -12,50 +12,24 @@
 
 // ─── Icon path cache ─────────────────────────────────────────────────────────
 // Fetches SVG path data from HA's bundled MDI icon set on demand.
-// The static FALLBACK_PATHS covers the most common icons for instant first-paint.
-// Any icon not in the fallback is resolved via ha-icon shadow DOM and cached.
+
+// Icons are resolved on demand via ha-icon shadow DOM extraction and cached.
 // Once cached, the next animation frame picks it up — no flicker, no rebuild.
 
 const _iconCache = new Map();
 const _iconFetching = new Set();
 
-// Common icons — available immediately, no network round-trip
-const FALLBACK_PATHS = {
-  "mdi:web":            "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z",
-  "mdi:router-network": "M10.59 2.59L9.17 4 11 5.83V8.1c-2.33.48-4.09 2.54-4.09 5 0 1.7.83 3.21 2.09 4.17V20h2v-2h2v2h2v-2.73c1.26-.96 2.09-2.47 2.09-4.17 0-2.46-1.76-4.52-4.09-5V5.83L14.83 4 13.41 2.59 12 4 10.59 2.59zM12 10c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 2c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z",
-  "mdi:router":         "M13.95 13.5h-3.89C9.43 13.5 9 13.93 9 14.5s.43 1 1.06 1h3.89c.62 0 1.05-.43 1.05-1s-.43-1-1.05-1M10 11h1v1h-1zm3 0h1v1h-1zM12 2A10 10 0 002 12a10 10 0 0010 10 10 10 0 0010-10A10 10 0 0012 2m0 2a8 8 0 018 8 8 8 0 01-8 8A8 8 0 014 12 8 8 0 0112 4m-1.5 3v3h-3l4.5 5 4.5-5h-3V7h-3z",
-  "mdi:switch":         "M20 14H4a2 2 0 00-2 2v1a2 2 0 002 2h16a2 2 0 002-2v-1a2 2 0 00-2-2m-2 2.5a.5.5 0 01-.5.5.5.5 0 01-.5-.5.5.5 0 01.5-.5.5.5 0 01.5.5m2 0a.5.5 0 01-.5.5.5.5 0 01-.5-.5.5.5 0 01.5-.5.5.5 0 01.5.5M4 6h16a2 2 0 012 2v1a2 2 0 01-2 2H4a2 2 0 01-2-2V8a2 2 0 012-2m14 2.5a.5.5 0 00-.5-.5.5.5 0 00-.5.5.5.5 0 00.5.5.5.5 0 00.5-.5m2 0a.5.5 0 00-.5-.5.5.5 0 00-.5.5.5.5 0 00.5.5.5.5 0 00.5-.5",
-  "mdi:wifi":           "M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.08 2.93 1 9zm8 8l3 3 3-3c-1.65-1.66-4.34-1.66-6 0zm-4-4l2 2c2.76-2.76 7.24-2.76 10 0l2-2C15.14 9.14 8.87 9.14 5 13z",
-  "mdi:wifi-off":       "M2.28 3L1 4.27l2.1 2.1C1.16 7.74.22 9.23 0 11h2c.28-1.22.94-2.3 1.84-3.16L5.3 9.3A5.98 5.98 0 003 14c0 3.31 2.69 6 6 6a5.98 5.98 0 004.7-2.3l4 4L19 20.46 2.28 3M9 14a3 3 0 003 3 2.97 2.97 0 001.71-.54L9.54 12.29A2.97 2.97 0 009 14M12 8c-1.07 0-2.07.28-2.96.74l1.47 1.47C11 10.08 11.5 10 12 10c3.31 0 6 2.69 6 6a5.96 5.96 0 01-.74 2.89l1.47 1.47C19.72 18.93 20 17.5 20 16c0-4.42-3.58-8-8-8m0-6C8.08 2 4.42 3.34 1.5 5.63l1.5 1.5C5.46 5.23 8.58 4 12 4c3.53 0 6.73 1.3 9.19 3.43l1.5-1.5C20.04 3.48 16.28 2 12 2z",
-  "mdi:access-point":   "M12 2A10 10 0 002 12a10 10 0 0010 10 10 10 0 0010-10A10 10 0 0012 2m0 2a8 8 0 018 8 8 8 0 01-8 8A8 8 0 014 12 8 8 0 0112 4m0 2a6 6 0 00-6 6 6 6 0 006 6 6 6 0 006-6 6 6 0 00-6-6m0 2a4 4 0 014 4 4 4 0 01-4 4 4 4 0 01-4-4 4 4 0 014-4m0 2a2 2 0 00-2 2 2 2 0 002 2 2 2 0 002-2 2 2 0 00-2-2",
-  "mdi:vpn":            "M12 1C8.676 1 6 3.676 6 7v1H4v14h16V8h-2V7c0-3.324-2.676-6-6-6zm0 2c2.276 0 4 1.724 4 4v1H8V7c0-2.276 1.724-4 4-4zm0 9a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2z",
-  "mdi:nas":            "M4 2h16a2 2 0 012 2v7a2 2 0 01-2 2H4a2 2 0 01-2-2V4a2 2 0 012-2m0 2v3h4V4H4m6 0v3h4V4h-4m6 0v3h4V4h-4M4 9v3h4V9H4m6 0v3h4V9h-4m6 0v3h4V9h-4M4 14h16a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4a2 2 0 012-2m2 3a1 1 0 100 2 1 1 0 000-2",
-  "mdi:server":         "M4 1h16a1 1 0 011 1v4a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1m0 6h16a1 1 0 011 1v4a1 1 0 01-1 1H4a1 1 0 01-1-1V8a1 1 0 011-1m0 6h16a1 1 0 011 1v4a1 1 0 01-1 1H4a1 1 0 01-1-1v-4a1 1 0 011-1m1 1v2h2v-2H5m0-6v2h2V8H5M5 2v2h2V2H5",
-  "mdi:server-network": "M11 2a2 2 0 012 2v4a2 2 0 01-2 2H9l-2 2v-2H5a2 2 0 01-2-2V4a2 2 0 012-2h6m7 6a2 2 0 012 2v4a2 2 0 01-2 2h-2l-2 2v-2h-2a2 2 0 01-2-2v-4a2 2 0 012-2h6M4 20v-2h3v2H4m4 0v-2h4v2H8m5 0v-2h3v2h-3",
-  "mdi:ethernet":       "M7 7v3H5V7H3V1h2v4h2V1h2v6H7zm7 0v3h-2V7h-2V1h2v4h2V1h2v6h-2zM3 13h18v2H3v-2zm2 4h14v2H5v-2zm2 4h10v2H7v-2z",
-  "mdi:firewall":       "M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 4l5 2.18V11c0 3.5-2.33 6.79-5 7.93-2.67-1.14-5-4.43-5-7.93V7.18L12 5z",
-  "mdi:home-network":   "M12 3L2 12h3v8h14v-8h3L12 3zm0 2.7L19 12v7H5v-7l7-6.3zM12 8c-2.2 0-4 1.8-4 4 0 1.5.8 2.8 2 3.4V17h4v-1.6c1.2-.6 2-1.9 2-3.4 0-2.2-1.8-4-4-4zm0 2c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2z",
-  "mdi:lan":            "M18 22H6a4 4 0 01-4-4V6a4 4 0 014-4h12a4 4 0 014 4v12a4 4 0 01-4 4m-7-2h2v-2h-2v2m-2 0h2v-2H9v2m-2 0h2v-2H7v2m4-4h2v-2h-2v2m-2 0h2v-2H9v2m-2 0h2v-2H7v2m4-4h2v-2h-2v2m-2 0h2v-2H9v2m-2 0h2v-2H7v2m8 8h2v-2h-2v2m0-4h2v-2h-2v2m0-4h2v-2h-2v2",
-  "mdi:network":        "M15 20a1 1 0 00-1-1h-1v-2h4a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2h4v2h-1a1 1 0 00-1 1H2v2h5a1 1 0 001 1h8a1 1 0 001-1h5v-2h-7m-8-5V5h10v10H7z",
-  "mdi:shield-lock":    "M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 4c1.4 0 2.5 1.1 2.5 2.5S13.4 10 12 10 9.5 8.9 9.5 7.5 10.6 5 12 5zm0 9c-2.22 0-4.19-1.14-5.35-2.87.03-1.77 3.58-2.75 5.35-2.75s5.32.98 5.35 2.75C16.19 12.86 14.22 14 12 14z",
-  "mdi:tunnel":         "M2 6C2 6 2 18 12 18S22 6 22 6H2M12 16C7 16 4.07 11.25 3.13 8H20.87C19.93 11.25 17 16 12 16Z",
-  "mdi:cloud":          "M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z",
-  "mdi:help-circle":    "M15.07 11.25l-.9.92C13.45 12.89 13 13.5 13 15h-2v-.5c0-1.11.45-2.11 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41a2 2 0 00-2-2 2 2 0 00-2 2H8a4 4 0 014-4 4 4 0 014 4 3.2 3.2 0 01-.93 2.25M13 19h-2v-2h2M12 2A10 10 0 002 12a10 10 0 0010 10 10 10 0 0010-10c0-5.53-4.5-10-10-10z",
-  "mdi:desktop-classic":"M8 13H4c-1.1 0-2 .9-2 2v4h2v-1h16v1h2v-4c0-1.1-.9-2-2-2h-4V8H4V4h16v9h2V4c0-1.1-.9-2-2-2H4C2.9 2 2 2.9 2 4v6h6v3zm-2 4v-2h12v2H6z",
-  "mdi:cellphone":      "M17 19H7V5h10m0-4H7c-1.11 0-2 .89-2 2v18a2 2 0 002 2h10a2 2 0 002-2V3a2 2 0 00-2-2z",
-  "mdi:television":     "M21 17H3V5h18m0-2H3c-1.1 0-2 .89-2 2v12a2 2 0 002 2h5v2h8v-2h5a2 2 0 002-2V5c0-1.11-.9-2-2-2z",
-};
-
-// Seed the cache with fallbacks so they're immediately available
-for (const [k, v] of Object.entries(FALLBACK_PATHS)) _iconCache.set(k, v);
+// All icons are resolved dynamically via ha-icon shadow DOM extraction.
+// Results are cached so each icon is only fetched once per session.
 
 // Resolve an MDI icon path by rendering a hidden ha-icon element and reading
 // the SVG path from its shadow DOM. This works with any icon HA supports,
 // including all mdi:* icons, without relying on any internal HA endpoints.
 //
-// The ha-icon element handles all version differences internally — we just
-// wait for it to render, grab the <path d="..."> from its shadow root, cache
-// it, and remove the temporary element. Subsequent lookups are instant.
+// The ha-icon element handles all version differences internally — always
+// matching exactly what HA renders in its own UI. We wait for it to render,
+// grab the <path d="..."> from its shadow root, cache it, and remove the
+// temporary element. Subsequent lookups hit the cache instantly.
 
 // Off-screen container for temporary ha-icon elements
 let _iconStage = null;
@@ -445,7 +419,7 @@ class NetworkFlowRenderer {
     ctx.stroke(); ctx.setLineDash([]);
     this._rrect(x, y, NODE_W, 5, RX); ctx.fillStyle = bar; ctx.fill();
     ctx.fillRect(x, y + 3, NODE_W, 2);
-    // Get path from cache (populated by fetchMdiPath + FALLBACK_PATHS)
+    // Get path from cache (populated by fetchMdiPath via ha-icon extraction)
     const ip = _iconCache.get(node.icon);
     const ic = node.color?.icon || (standby ? this._theme.standby : offline ? this._theme.offline : this._theme.upload);
     if (ip) {
