@@ -366,228 +366,429 @@ class NetworkFlowRenderer {
   }
 }
 
+
 // ─── Visual Editor ────────────────────────────────────────────────────────────
+// Core rule: text fields NEVER trigger a DOM rebuild.
+// - Text input → writes to _config, debounces _fireChange (400ms)
+// - Selects / color pickers / entity pickers → write + fire immediately (single events)
+// - Structural changes (add/remove node or link, expand/collapse) → targeted rebuild
+//   of only the affected list, never the whole shadow DOM
+// This keeps focus stable so users can type normally.
 
 class NetworkFlowCardEditor extends HTMLElement {
-  constructor() { super(); this.attachShadow({ mode: "open" }); }
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._config = null;
+    this._hass = null;
+    this._activeNodeIdx = null;
+    this._mounted = false;
+    this._textTimer = null;
+    this._interacting = false;  // true while a select/picker is open
+    this._interactTimer = null;
+  }
 
-  set hass(hass) { this._hass = hass; }
+  set hass(h) {
+    this._hass = h;
+    // Push updated hass into any live ha-selector elements without rebuilding
+    if (this._mounted) {
+      this.shadowRoot.querySelectorAll("ha-selector").forEach(el => { el.hass = h; });
+    }
+  }
 
   setConfig(config) {
     this._config = JSON.parse(JSON.stringify(config));
-    this._render();
+    if (!this._mounted) {
+      this._buildShell();
+      this._mounted = true;
+    } else if (!this._interacting) {
+      // Only sync field values when no user interaction is in flight.
+      // If a select is open, HA's setConfig callback would reset it mid-pick.
+      this._syncValues();
+    }
   }
 
   _fireChange() {
-    this.dispatchEvent(new CustomEvent("config-changed", { detail: { config: this._config }, bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent("config-changed", {
+      detail: { config: this._config },
+      bubbles: true,
+      composed: true,
+    }));
   }
 
-  _set(key, val) { this._config = { ...this._config, [key]: val }; this._fireChange(); this._render(); }
-  _setTheme(key, val) { this._set("theme", { ...(this._config.theme||{}), [key]: val }); }
+  // Write helpers — update _config in place, fire event, NO DOM rebuild ───────
 
-  _setNode(idx, key, val) {
-    const nodes = [...(this._config.nodes||[])];
-    nodes[idx] = { ...nodes[idx], [key]: val };
-    this._set("nodes", nodes);
+  _wTop(key, val)               { this._config = { ...this._config, [key]: val }; this._fireChange(); }
+  _wTheme(key, val)             { this._wTop("theme", { ...(this._config.theme||{}), [key]: val }); }
+  _wNodeField(i, key, val)      { const n=[...this._config.nodes]; n[i]={...n[i],[key]:val}; this._wTop("nodes",n); }
+  _wNodeEntity(i, ek, val)      { const n=[...this._config.nodes]; n[i]={...n[i],entities:{...(n[i].entities||{}),[ek]:val}}; this._wTop("nodes",n); }
+  _wNodeColor(i, ck, val)       { const n=[...this._config.nodes]; n[i]={...n[i],color:{...(n[i].color||{}),[ck]:val}}; this._wTop("nodes",n); }
+  _wLink(i, key, val)           { const l=[...this._config.links]; l[i]={...l[i],[key]:val}; this._wTop("links",l); }
+
+  // Debounced text input — writes config immediately, fires after 400ms pause
+  _onText(writeFn) {
+    writeFn();
+    clearTimeout(this._textTimer);
+    this._textTimer = setTimeout(() => this._fireChange(), 400);
   }
 
-  _setEntity(idx, ekey, val) {
-    const nodes = [...(this._config.nodes||[])];
-    nodes[idx] = { ...nodes[idx], entities: { ...(nodes[idx].entities||{}), [ekey]: val } };
-    this._set("nodes", nodes);
-  }
+  // Build the shell HTML once ─────────────────────────────────────────────────
 
-  _setColor(idx, ckey, val) {
-    const nodes = [...(this._config.nodes||[])];
-    nodes[idx] = { ...nodes[idx], color: { ...(nodes[idx].color||{}), [ckey]: val } };
-    this._set("nodes", nodes);
-  }
+  _buildShell() {
+    this.shadowRoot.innerHTML = `<style>
+      :host{display:block;font-family:var(--paper-font-body1_-_font-family,system-ui)}
+      .sec{font-size:11px;font-weight:500;color:var(--secondary-text-color);text-transform:uppercase;
+           letter-spacing:.06em;margin:18px 0 8px;padding-bottom:4px;
+           border-bottom:1px solid var(--divider-color);display:flex;align-items:center}
+      .sec:first-child{margin-top:0}
+      .sec-btn{font-size:12px;color:var(--primary-color);background:none;border:none;
+               cursor:pointer;font-family:inherit;margin-left:8px;padding:0}
+      ha-textfield{width:100%;display:block;margin-bottom:8px}
+      .two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+      .node-row{display:flex;align-items:center;gap:8px;padding:8px 10px;
+                background:var(--secondary-background-color);border-radius:8px;
+                cursor:pointer;border:1.5px solid transparent;margin-bottom:6px}
+      .node-row.active{border-color:var(--primary-color)}
+      .node-lbl{flex:1;font-size:13px;color:var(--primary-text-color)}
+      .node-type{font-size:11px;color:var(--secondary-text-color)}
+      .node-detail{padding:12px;background:var(--card-background-color,#fff);
+                   border-radius:8px;border:1px solid var(--divider-color);
+                   margin-bottom:8px;display:none}
+      .node-detail.open{display:block}
+      .del-btn{font-size:12px;color:var(--error-color);background:none;border:none;
+               cursor:pointer;font-family:inherit;float:right;margin-bottom:8px}
+      .color-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+      .color-lbl{flex:1;font-size:13px;color:var(--primary-text-color)}
+      .swatch{width:36px;height:28px;border:none;border-radius:6px;cursor:pointer;padding:2px}
+      .link-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+      .link-row ha-select{flex:1}
+      ha-select{display:block;margin-bottom:8px}
+      ha-selector{display:block;margin-bottom:8px}
+      .arrow{color:var(--secondary-text-color);flex-shrink:0}
+      .subsec{font-size:10px;font-weight:500;color:var(--secondary-text-color);
+              text-transform:uppercase;letter-spacing:.05em;
+              margin:12px 0 6px;padding-bottom:3px;border-bottom:1px solid var(--divider-color)}
+    </style>
+    <div class="sec">Card</div>
+    <ha-textfield id="f-title" label="Title"></ha-textfield>
+    <div class="sec">Theme colors</div>
+    <div id="theme-colors"></div>
+    <div class="sec">Nodes<button class="sec-btn" id="btn-add-node">+ Add node</button></div>
+    <div id="node-list"></div>
+    <div class="sec">Links<button class="sec-btn" id="btn-add-link">+ Add link</button></div>
+    <div id="link-list"></div>`;
 
-  _setLink(idx, key, val) {
-    const links = [...(this._config.links||[])];
-    links[idx] = { ...links[idx], [key]: val };
-    this._set("links", links);
-  }
-
-  _render() {
-    const cfg = this._config;
-    const theme = mergeTheme(DEFAULT_THEME, cfg.theme || {});
-    const nodes = cfg.nodes || [];
-    const links = cfg.links || [];
-    const activeIdx = this._activeNodeIdx ?? null;
-
-    this.shadowRoot.innerHTML = `
-      <style>
-        :host { display: block; font-family: var(--paper-font-body1_-_font-family, system-ui); }
-        .sec { font-size: 11px; font-weight: 500; color: var(--secondary-text-color); text-transform: uppercase;
-               letter-spacing: .06em; margin: 18px 0 8px; padding-bottom: 4px;
-               border-bottom: 1px solid var(--divider-color); }
-        .sec:first-child { margin-top: 0; }
-        ha-textfield { width: 100%; display: block; margin-bottom: 8px; }
-        .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-        .node-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
-                    background: var(--secondary-background-color); border-radius: 8px;
-                    cursor: pointer; border: 1.5px solid transparent; margin-bottom: 6px; }
-        .node-row.active { border-color: var(--primary-color); }
-        .node-lbl { flex: 1; font-size: 13px; color: var(--primary-text-color); }
-        .node-type { font-size: 11px; color: var(--secondary-text-color); }
-        .node-detail { padding: 12px; background: var(--card-background-color, #fff);
-                       border-radius: 8px; border: 1px solid var(--divider-color); margin-bottom: 8px; }
-        .color-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-        .color-lbl { flex: 1; font-size: 13px; color: var(--primary-text-color); }
-        .add-btn { font-size: 12px; color: var(--primary-color); background: none; border: none;
-                   cursor: pointer; font-family: inherit; padding: 0 0 0 8px; }
-        .del-btn { font-size: 12px; color: var(--error-color); background: none; border: none;
-                   cursor: pointer; font-family: inherit; float: right; }
-        .link-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-        .link-row ha-select { flex: 1; }
-        ha-select { display: block; margin-bottom: 8px; }
-        ha-selector { display: block; margin-bottom: 8px; }
-        .arrow { color: var(--secondary-text-color); }
-      </style>
-
-      <div class="sec">Card</div>
-      <ha-textfield label="Title" id="title" value="${cfg.title || ""}"></ha-textfield>
-
-      <div class="sec">Theme colors</div>
-      ${THEME_FIELDS.map(f => `
-        <div class="color-row">
-          <span class="color-lbl">${f.label}</span>
-          <input type="color" value="${theme[f.key] || "#888888"}" data-theme="${f.key}"
-                 style="width:36px;height:28px;border:none;border-radius:6px;cursor:pointer;padding:2px">
-        </div>
-      `).join("")}
-
-      <div class="sec">Nodes <button class="add-btn" id="add-node">+ Add</button></div>
-      ${nodes.map((node, idx) => `
-        <div class="node-row ${activeIdx === idx ? "active" : ""}" data-idx="${idx}">
-          <ha-icon icon="${node.icon || "mdi:help-circle"}" style="color:var(--primary-color);width:20px;height:20px"></ha-icon>
-          <span class="node-lbl">${node.label || node.id}</span>
-          <span class="node-type">${node.type || "interface"}</span>
-        </div>
-        ${activeIdx === idx ? `
-          <div class="node-detail">
-            <button class="del-btn" data-del="${idx}">Remove</button>
-            <div class="two">
-              <ha-textfield label="ID" value="${node.id||""}" data-node="${idx}" data-key="id"></ha-textfield>
-              <ha-textfield label="Label" value="${node.label||""}" data-node="${idx}" data-key="label"></ha-textfield>
-            </div>
-            <div class="two">
-              <ha-textfield label="Sublabel" value="${node.sublabel||""}" data-node="${idx}" data-key="sublabel"></ha-textfield>
-              <ha-textfield label="Icon (mdi:...)" value="${node.icon||""}" data-node="${idx}" data-key="icon"></ha-textfield>
-            </div>
-            <div class="two">
-              <ha-select label="Type" data-node="${idx}" data-key="type" value="${node.type||"interface"}">
-                <mwc-list-item value="isp">ISP</mwc-list-item>
-                <mwc-list-item value="router">Router / Firewall</mwc-list-item>
-                <mwc-list-item value="switch">Switch</mwc-list-item>
-                <mwc-list-item value="interface">Interface</mwc-list-item>
-                <mwc-list-item value="device">Device</mwc-list-item>
-              </ha-select>
-              <ha-select label="Default status" data-node="${idx}" data-key="status" value="${node.status||"online"}">
-                <mwc-list-item value="online">Online</mwc-list-item>
-                <mwc-list-item value="standby">Standby</mwc-list-item>
-                <mwc-list-item value="offline">Offline</mwc-list-item>
-              </ha-select>
-            </div>
-
-            <div class="sec" style="margin-top:10px">Entity bindings</div>
-            ${["status","ip","upload","download","ping","clients"].map(ek => `
-              <ha-selector .hass="${{}}" label="${ek.charAt(0).toUpperCase()+ek.slice(1)}"
-                .selector="${JSON.stringify({ entity: { domain: ek === "status" ? ["binary_sensor","sensor"] : "sensor" } })}"
-                value="${node.entities?.[ek]||""}" data-ent="${idx}" data-ekey="${ek}"></ha-selector>
-            `).join("")}
-
-            <div class="sec" style="margin-top:10px">Color overrides</div>
-            ${NODE_COLOR_FIELDS.map(cf => `
-              <div class="color-row">
-                <span class="color-lbl">${cf.label}</span>
-                <input type="color" value="${node.color?.[cf.key] || "#888888"}"
-                       data-ncolor="${idx}" data-ckey="${cf.key}"
-                       style="width:36px;height:28px;border:none;border-radius:6px;cursor:pointer;padding:2px">
-              </div>
-            `).join("")}
-          </div>
-        ` : ""}
-      `).join("")}
-
-      <div class="sec">Links <button class="add-btn" id="add-link">+ Add</button></div>
-      ${links.map((lk, idx) => `
-        <div class="link-row">
-          <ha-select data-link="${idx}" data-lkey="from" value="${lk.from||""}">
-            ${nodes.map(n => `<mwc-list-item value="${n.id}">${n.label||n.id}</mwc-list-item>`).join("")}
-          </ha-select>
-          <span class="arrow">→</span>
-          <ha-select data-link="${idx}" data-lkey="to" value="${lk.to||""}">
-            ${nodes.map(n => `<mwc-list-item value="${n.id}">${n.label||n.id}</mwc-list-item>`).join("")}
-          </ha-select>
-          <ha-icon-button data-del-link="${idx}" .path="${"M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"}"></ha-icon-button>
-        </div>
-      `).join("")}
-    `;
-
-    // Wire events after render
     const sr = this.shadowRoot;
 
-    sr.getElementById("title")?.addEventListener("input", e => this._set("title", e.target.value));
-    sr.getElementById("add-node")?.addEventListener("click", () => {
-      const nodes2 = [...(this._config.nodes||[])];
-      this._activeNodeIdx = nodes2.length;
-      nodes2.push({ id: `node${nodes2.length+1}`, label: `Node ${nodes2.length+1}`, icon: "mdi:help-circle", type: "interface", status: "online", entities: {}, color: {} });
-      this._set("nodes", nodes2);
+    // Title — listen for both input (debounce) and change (immediate on blur)
+    const titleEl = sr.getElementById("f-title");
+    titleEl.value = this._config.title || "";
+    titleEl.addEventListener("input", e => {
+      this._config = { ...this._config, title: e.target.value };
+      clearTimeout(this._textTimer);
+      this._textTimer = setTimeout(() => this._fireChange(), 400);
     });
-    sr.getElementById("add-link")?.addEventListener("click", () => {
-      const links2 = [...(this._config.links||[])];
-      const n = this._config.nodes || [];
-      links2.push({ from: n[0]?.id||"", to: n[1]?.id||"" });
-      this._set("links", links2);
+    titleEl.addEventListener("change", e => {
+      this._config = { ...this._config, title: e.target.value };
+      this._fireChange();
     });
 
-    sr.querySelectorAll("[data-theme]").forEach(el => {
-      el.addEventListener("input", e => this._setTheme(e.target.dataset.theme, e.target.value));
+    sr.getElementById("btn-add-node").addEventListener("click", () => {
+      const nodes = [...(this._config.nodes||[])];
+      this._activeNodeIdx = nodes.length;
+      nodes.push({ id:`node${nodes.length+1}`, label:`Node ${nodes.length+1}`,
+                   icon:"mdi:help-circle", type:"interface", status:"online",
+                   entities:{}, color:{} });
+      this._config = { ...this._config, nodes };
+      this._fireChange();
+      this._rebuildNodes();
+      this._rebuildLinks();
     });
-    sr.querySelectorAll(".node-row").forEach(el => {
-      el.addEventListener("click", () => {
-        const idx2 = parseInt(el.dataset.idx);
-        this._activeNodeIdx = this._activeNodeIdx === idx2 ? null : idx2;
-        this._render();
+
+    sr.getElementById("btn-add-link").addEventListener("click", () => {
+      const links = [...(this._config.links||[])];
+      const n = this._config.nodes || [];
+      links.push({ from: n[0]?.id||"", to: n[1]?.id||"" });
+      this._config = { ...this._config, links };
+      this._fireChange();
+      this._rebuildLinks();
+    });
+
+    this._buildThemeColors();
+    this._rebuildNodes();
+    this._rebuildLinks();
+  }
+
+  // Sync field values when config changes externally ──────────────────────────
+
+  _syncValues() {
+    const sr = this.shadowRoot;
+    // Never sync field values while any interactive element is focused or
+    // while the _interacting flag is set (select/picker open)
+    if (this._interacting) return;
+
+    const titleEl = sr.getElementById("f-title");
+    if (titleEl && sr.activeElement !== titleEl) {
+      titleEl.value = this._config.title || "";
+    }
+    const theme = mergeTheme(DEFAULT_THEME, this._config.theme || {});
+    THEME_FIELDS.forEach(f => {
+      const el = sr.querySelector(`[data-theme="${f.key}"]`);
+      if (el) el.value = theme[f.key] || "#888888";
+    });
+    // Sync ha-selector values only when not interacting (picker not open)
+    sr.querySelectorAll("ha-selector").forEach(sel => {
+      if (sel._pendingInteraction) return;
+      const nodeIdx = parseInt(sel.dataset.nodeIdx);
+      const ek = sel.dataset.entityKey;
+      if (!isNaN(nodeIdx) && ek) {
+        const val = this._config.nodes[nodeIdx]?.entities?.[ek] || "";
+        if (sel.value !== val) sel.value = val;
+      }
+    });
+  }
+
+  // Theme color swatches — built once ────────────────────────────────────────
+
+  _buildThemeColors() {
+    const container = this.shadowRoot.getElementById("theme-colors");
+    const theme = mergeTheme(DEFAULT_THEME, this._config.theme || {});
+    THEME_FIELDS.forEach(f => {
+      const row = document.createElement("div");
+      row.className = "color-row";
+      const lbl = document.createElement("span");
+      lbl.className = "color-lbl";
+      lbl.textContent = f.label;
+      const sw = document.createElement("input");
+      sw.type = "color"; sw.className = "swatch";
+      sw.value = theme[f.key] || "#888888";
+      sw.dataset.theme = f.key;
+      sw.addEventListener("input", e => this._wTheme(e.target.dataset.theme, e.target.value));
+      row.appendChild(lbl); row.appendChild(sw);
+      container.appendChild(row);
+    });
+  }
+
+  // Node list — rebuilt only on structural changes ───────────────────────────
+
+  _rebuildNodes() {
+    const container = this.shadowRoot.getElementById("node-list");
+    container.innerHTML = "";
+    const nodes = this._config.nodes || [];
+
+    nodes.forEach((node, idx) => {
+      // Header row
+      const row = document.createElement("div");
+      row.className = "node-row" + (this._activeNodeIdx === idx ? " active" : "");
+      row.innerHTML = `
+        <ha-icon icon="${node.icon||"mdi:help-circle"}"
+                 style="color:var(--primary-color);width:20px;height:20px;flex-shrink:0"></ha-icon>
+        <span class="node-lbl">${node.label||node.id||`Node ${idx+1}`}</span>
+        <span class="node-type">${node.type||"interface"}</span>`;
+      row.addEventListener("click", () => {
+        this._activeNodeIdx = this._activeNodeIdx === idx ? null : idx;
+        container.querySelectorAll(".node-row").forEach((r,i)   => r.classList.toggle("active", i===this._activeNodeIdx));
+        container.querySelectorAll(".node-detail").forEach((d,i) => d.classList.toggle("open",  i===this._activeNodeIdx));
       });
-    });
-    sr.querySelectorAll("[data-node]").forEach(el => {
-      el.addEventListener("input", e => this._setNode(parseInt(e.target.dataset.node), e.target.dataset.key, e.target.value));
-      el.addEventListener("selected", e => this._setNode(parseInt(e.target.dataset.node), e.target.dataset.key, e.target.value));
-    });
-    sr.querySelectorAll("[data-ent]").forEach(el => {
-      el.addEventListener("value-changed", e => this._setEntity(parseInt(el.dataset.ent), el.dataset.ekey, e.detail.value));
-    });
-    sr.querySelectorAll("[data-ncolor]").forEach(el => {
-      el.addEventListener("input", e => this._setColor(parseInt(e.target.dataset.ncolor), e.target.dataset.ckey, e.target.value));
-    });
-    sr.querySelectorAll("[data-link]").forEach(el => {
-      el.addEventListener("selected", e => this._setLink(parseInt(e.target.dataset.link), e.target.dataset.lkey, e.target.value));
-    });
-    sr.querySelectorAll("[data-del]").forEach(el => {
-      el.addEventListener("click", e => {
+      container.appendChild(row);
+
+      // Detail panel
+      const detail = document.createElement("div");
+      detail.className = "node-detail" + (this._activeNodeIdx === idx ? " open" : "");
+
+      // Remove button
+      const delBtn = document.createElement("button");
+      delBtn.className = "del-btn"; delBtn.textContent = "Remove node";
+      delBtn.addEventListener("click", e => {
         e.stopPropagation();
-        const idx2 = parseInt(el.dataset.del);
-        const removedId = this._config.nodes[idx2]?.id;
-        const nodes2 = [...this._config.nodes]; nodes2.splice(idx2, 1);
-        const links2 = (this._config.links||[]).filter(l => l.from !== removedId && l.to !== removedId);
+        const removedId = this._config.nodes[idx]?.id;
+        const nodes2 = [...this._config.nodes]; nodes2.splice(idx, 1);
+        const links2 = (this._config.links||[]).filter(l => l.from!==removedId && l.to!==removedId);
         this._activeNodeIdx = null;
         this._config = { ...this._config, nodes: nodes2, links: links2 };
-        this._fireChange(); this._render();
+        this._fireChange();
+        this._rebuildNodes();
+        this._rebuildLinks();
       });
-    });
-    sr.querySelectorAll("[data-del-link]").forEach(el => {
-      el.addEventListener("click", () => {
-        const links2 = [...(this._config.links||[])]; links2.splice(parseInt(el.dataset.delLink), 1);
-        this._set("links", links2);
+      detail.appendChild(delBtn);
+
+      // Text fields in a 2-col grid — each one is stable, no rebuild on input
+      const grid = document.createElement("div"); grid.className = "two";
+      [
+        { key:"id",       label:"ID (unique)" },
+        { key:"label",    label:"Label" },
+        { key:"sublabel", label:"Sublabel" },
+        { key:"icon",     label:"Icon (mdi:...)" },
+      ].forEach(f => {
+        const tf = document.createElement("ha-textfield");
+        tf.label = f.label; tf.value = node[f.key] || "";
+        tf.addEventListener("input", e => {
+          const nodes2 = [...this._config.nodes];
+          nodes2[idx] = { ...nodes2[idx], [f.key]: e.target.value };
+          this._config = { ...this._config, nodes: nodes2 };
+          // Live-update the node row label/icon without a rebuild
+          if (f.key === "label") {
+            const el = container.querySelectorAll(".node-lbl")[idx];
+            if (el) el.textContent = e.target.value || node.id || `Node ${idx+1}`;
+          }
+          if (f.key === "icon") {
+            const el = container.querySelectorAll(".node-row ha-icon")[idx];
+            if (el) el.setAttribute("icon", e.target.value || "mdi:help-circle");
+          }
+          clearTimeout(this._textTimer);
+          this._textTimer = setTimeout(() => this._fireChange(), 400);
+        });
+        tf.addEventListener("change", e => {
+          const nodes2 = [...this._config.nodes];
+          nodes2[idx] = { ...nodes2[idx], [f.key]: e.target.value };
+          this._config = { ...this._config, nodes: nodes2 };
+          this._fireChange();
+        });
+        grid.appendChild(tf);
       });
+      detail.appendChild(grid);
+
+      // Type + Status selects
+      const sg = document.createElement("div"); sg.className = "two";
+      sg.appendChild(this._sel("Type", [
+        {v:"isp",l:"ISP"},{v:"router",l:"Router / Firewall"},
+        {v:"switch",l:"Switch"},{v:"interface",l:"Interface"},{v:"device",l:"Device"},
+      ], node.type||"interface", val => {
+        this._wNodeField(idx, "type", val);
+        const el = container.querySelectorAll(".node-type")[idx];
+        if (el) el.textContent = val;
+      }));
+      sg.appendChild(this._sel("Default status", [
+        {v:"online",l:"Online"},{v:"standby",l:"Standby"},{v:"offline",l:"Offline"},
+      ], node.status||"online", val => this._wNodeField(idx, "status", val)));
+      detail.appendChild(sg);
+
+      // Entity bindings
+      const esec = document.createElement("div"); esec.className = "subsec"; esec.textContent = "Entity bindings";
+      detail.appendChild(esec);
+      ["status","ip","upload","download","ping","clients"].forEach(ek => {
+        const sel = document.createElement("ha-selector");
+        sel.label = ek.charAt(0).toUpperCase() + ek.slice(1);
+        sel.hass = this._hass;
+        sel.selector = ek==="status" ? {entity:{domain:["binary_sensor","sensor"]}} : {entity:{domain:"sensor"}};
+        sel.value = node.entities?.[ek] || "";
+        // Store identifiers so _syncValues can update this element by reference
+        sel.dataset.nodeIdx = idx;
+        sel.dataset.entityKey = ek;
+
+        // ha-selector opens a full HA dialog — no "opened" event exists.
+        // We detect interaction via focus on the inner input, and lock out
+        // setConfig() syncs until the value-changed event resolves.
+        sel.addEventListener("focus", () => {
+          this._interacting = true;
+          sel._pendingInteraction = true;
+          clearTimeout(this._interactTimer);
+        }, true); // capture phase so we catch focus on internal input
+
+        sel.addEventListener("value-changed", e => {
+          // Clear interaction lock after a short delay to let the HA
+          // config-changed round-trip complete before allowing syncs
+          clearTimeout(this._interactTimer);
+          this._interactTimer = setTimeout(() => {
+            this._interacting = false;
+            sel._pendingInteraction = false;
+          }, 350);
+          this._wNodeEntity(idx, ek, e.detail.value);
+        });
+
+        // Also clear lock on blur in case the picker is dismissed without pick
+        sel.addEventListener("blur", () => {
+          clearTimeout(this._interactTimer);
+          this._interactTimer = setTimeout(() => {
+            this._interacting = false;
+            sel._pendingInteraction = false;
+          }, 350);
+        }, true); // capture phase
+
+        detail.appendChild(sel);
+      });
+
+      // Color overrides
+      const csec = document.createElement("div"); csec.className = "subsec"; csec.textContent = "Color overrides";
+      detail.appendChild(csec);
+      NODE_COLOR_FIELDS.forEach(cf => {
+        const cr = document.createElement("div"); cr.className = "color-row";
+        const cl = document.createElement("span"); cl.className = "color-lbl"; cl.textContent = cf.label;
+        const sw = document.createElement("input"); sw.type = "color"; sw.className = "swatch";
+        sw.value = node.color?.[cf.key] || "#888888";
+        sw.addEventListener("input", e => this._wNodeColor(idx, cf.key, e.target.value));
+        cr.appendChild(cl); cr.appendChild(sw);
+        detail.appendChild(cr);
+      });
+
+      container.appendChild(detail);
     });
+  }
+
+  // Link list — rebuilt only on structural changes ───────────────────────────
+
+  _rebuildLinks() {
+    const container = this.shadowRoot.getElementById("link-list");
+    container.innerHTML = "";
+    const nodes = this._config.nodes || [];
+    const nodeOpts = nodes.map(n => ({ v: n.id, l: n.label||n.id }));
+
+    (this._config.links || []).forEach((lk, idx) => {
+      const row = document.createElement("div"); row.className = "link-row";
+      row.appendChild(this._sel("From", nodeOpts, lk.from, val => this._wLink(idx, "from", val)));
+      const ar = document.createElement("span"); ar.className = "arrow"; ar.textContent = "→";
+      row.appendChild(ar);
+      row.appendChild(this._sel("To", nodeOpts, lk.to, val => this._wLink(idx, "to", val)));
+      const db = document.createElement("ha-icon-button");
+      db.path = "M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z";
+      db.addEventListener("click", () => {
+        const links2 = [...this._config.links]; links2.splice(idx, 1);
+        this._config = { ...this._config, links: links2 };
+        this._fireChange(); this._rebuildLinks();
+      });
+      row.appendChild(db);
+      container.appendChild(row);
+    });
+  }
+
+  // Helper: create a ha-select element ─────────────────────────────────────
+
+  _sel(label, options, current, onChange) {
+    const sel = document.createElement("ha-select");
+    sel.label = label;
+    options.forEach(o => {
+      const item = document.createElement("mwc-list-item");
+      item.value = o.v; item.textContent = o.l;
+      sel.appendChild(item);
+    });
+    // Set initial value after element upgrades
+    requestAnimationFrame(() => { sel.value = current; });
+
+    // Track when the dropdown opens so we can suppress setConfig() redraws
+    sel.addEventListener("opened", () => {
+      this._interacting = true;
+      clearTimeout(this._interactTimer);
+    });
+
+    // "closed" fires only when the mwc-menu closes — either after a user pick
+    // or when dismissed. Reading value here gives the post-selection value.
+    sel.addEventListener("closed", () => {
+      const newVal = sel.value;
+      // Clear the interaction lock after a short delay so the HA config-changed
+      // round-trip (setConfig callback) completes before we allow syncs again
+      this._interactTimer = setTimeout(() => { this._interacting = false; }, 300);
+      if (newVal && newVal !== sel.dataset.lastVal) {
+        sel.dataset.lastVal = newVal;
+        onChange(newVal);
+      }
+    });
+
+    // Seed lastVal so the closed handler has a baseline to diff against
+    sel.dataset.lastVal = current;
+    return sel;
   }
 }
 customElements.define("network-flow-card-editor", NetworkFlowCardEditor);
-
 // ─── Main Card ────────────────────────────────────────────────────────────────
 
 class NetworkFlowCard extends HTMLElement {
