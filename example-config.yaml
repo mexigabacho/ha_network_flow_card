@@ -48,6 +48,12 @@ theme:
 #             {% endif %}
 active_wan: sensor.active_wan_interface
 
+# ── Label position (optional) ──────────────────────────────────────────────────
+# Where to render IP, ping, clients, and secondary status relative to each node.
+# Options: below (default) | above | left | right
+# Can be overridden per node with meta_position:
+meta_position: below
+
 # ── Nodes ─────────────────────────────────────────────────────────────────────
 nodes:
 

@@ -161,7 +161,8 @@ function resolveEntityValue(hass, entityId, key) {
   if (state === "unavailable" || state === "unknown") return null;
   switch (key) {
     case "status":     return state;
-    case "active_wan": return state; // raw string e.g. "primary" / "backup"
+    case "status2":    return state; // secondary status entity — raw state string
+    case "active_wan": return state;
     case "ip":         return attrs.ip_address || attrs.ip || state || null;
     case "upload": case "download": case "ping": case "clients": {
       const n = parseFloat(state);
@@ -446,34 +447,181 @@ class NetworkFlowRenderer {
     this._drawMeta(node, pos, status);
   }
 
-  _drawMeta(node, pos, status) {
-    const ctx = this._ctx;
-    const offline = status === "offline", standby = status === "standby";
-    const st = this._states[node.id] || {};
-    const c  = this._colors || {};
-    const ff  = c.fontFamily || "system-ui";
-    const ffm = c.fontMono   || "monospace";
-    const muted = c.textSec  || "#6b6b6b";
-    let ly = pos.y + NODE_H + 11;
+  // Build the list of metadata lines to render for a node.
+  // Returns array of { text, font, color, alpha, dot, dotColor } objects.
+  _buildMetaLines(node, status) {
+    const st     = this._states[node.id] || {};
+    const c      = this._colors || {};
+    const ff     = c.fontFamily || "system-ui";
+    const ffm    = c.fontMono   || "monospace";
+    const muted  = c.textSec    || "#6b6b6b";
+    const ipCol  = node.color?.ip_text || muted;
+    const offline  = status === "offline";
+    const standby  = status === "standby";
+    const lines = [];
+
     const ip = st.ip ?? node.data?.ip;
     if (ip && !offline) {
-      ctx.save(); ctx.globalAlpha = standby ? 0.45 : 0.7;
-      ctx.font = `400 9px ${ffm}`; ctx.fillStyle = node.color?.ip_text || muted;
-      ctx.textAlign = "center"; ctx.textBaseline = "top";
-      ctx.fillText(ip, pos.x, ly); ctx.restore(); ly += 13;
+      lines.push({ text: ip, font: `400 9px ${ffm}`, color: ipCol, alpha: standby ? 0.45 : 0.7 });
     }
     const ping = st.ping ?? node.data?.ping;
     if (ping && !offline && !standby) {
-      ctx.save(); ctx.globalAlpha = 0.5; ctx.font = `400 9px ${ff}`;
-      ctx.fillStyle = muted; ctx.textAlign = "center"; ctx.textBaseline = "top";
-      ctx.fillText(ping + "ms", pos.x, ly); ctx.restore(); ly += 13;
+      lines.push({ text: ping + "ms", font: `400 9px ${ff}`, color: muted, alpha: 0.5 });
     }
     const clients = st.clients ?? node.data?.clients;
     if (clients && !offline) {
-      ctx.save(); ctx.globalAlpha = 0.55; ctx.font = `400 9px ${ff}`;
-      ctx.fillStyle = muted; ctx.textAlign = "center"; ctx.textBaseline = "top";
-      ctx.fillText(clients + " clients", pos.x, ly); ctx.restore();
+      lines.push({ text: clients + " clients", font: `400 9px ${ff}`, color: muted, alpha: 0.55 });
     }
+    // Secondary status entity — icon path + state string
+    const s2 = st.status2;
+    if (s2 !== null && s2 !== undefined && !offline) {
+      const iconKey = node.entities?.status2
+        ? this._getEntityIcon(node.entities.status2) : null;
+      lines.push({
+        text: s2,
+        font: `400 9px ${ff}`,
+        color: muted,
+        alpha: 0.75,
+        iconKey,               // mdi:* key — rendered as tiny dot if path available
+        dotColor: this._statusDotColor(s2),
+      });
+    }
+    return lines;
+  }
+
+  // Map common state strings to a meaningful dot color.
+  _statusDotColor(state) {
+    const s = (state || "").toLowerCase();
+    if (["on","online","connected","up","active","home","open","locked","enabled"].includes(s))
+      return this._theme.online;
+    if (["off","offline","disconnected","down","closed","unlocked","disabled"].includes(s))
+      return this._theme.offline;
+    if (["standby","idle","paused","away","unavailable"].includes(s))
+      return this._theme.standby;
+    return null; // no dot for unknown states
+  }
+
+  // Get the entity icon key from hass state attributes
+  _getEntityIcon(entityId) {
+    const host = this._canvas.getRootNode()?.host;
+    const hass = host?._hass;
+    if (!hass || !entityId) return null;
+    const obj = hass.states[entityId];
+    return obj?.attributes?.icon || null;
+  }
+
+  _drawMeta(node, pos, status) {
+    // Resolve position: per-node → card-level default → "below"
+    const position = node.meta_position ||
+                     this._config.meta_position ||
+                     "below";
+    const lines = this._buildMetaLines(node, status);
+    if (!lines.length) return;
+
+    const ctx    = this._ctx;
+    const LINE_H = 13;
+    const DOT_R  = 3;
+    const PAD    = 10; // gap between node box edge and metadata block
+
+    // Total height of the metadata block
+    const blockH = lines.length * LINE_H - 2;
+
+    // Anchor point and text alignment depend on position
+    let ax, ay, align, baseline;
+    switch (position) {
+      case "above":
+        ax = pos.x;
+        ay = pos.y - PAD - blockH;
+        align = "center"; baseline = "top";
+        break;
+      case "left":
+        ax = pos.x - NODE_W / 2 - PAD;
+        ay = pos.y + NODE_H / 2 - blockH / 2;
+        align = "right"; baseline = "top";
+        break;
+      case "right":
+        ax = pos.x + NODE_W / 2 + PAD;
+        ay = pos.y + NODE_H / 2 - blockH / 2;
+        align = "left"; baseline = "top";
+        break;
+      case "below":
+      default:
+        ax = pos.x;
+        ay = pos.y + NODE_H + PAD;
+        align = "center"; baseline = "top";
+        break;
+    }
+
+    lines.forEach((line, i) => {
+      const ly = ay + i * LINE_H;
+      ctx.save();
+      ctx.globalAlpha = line.alpha;
+      ctx.font = line.font;
+      ctx.textAlign = align;
+      ctx.textBaseline = baseline;
+
+      // Draw colored dot for secondary status (or icon if cached)
+      if (line.dotColor || line.iconKey) {
+        const dotCol = line.dotColor;
+        const iconPath = line.iconKey ? _iconCache.get(line.iconKey) : null;
+
+        // Calculate dot x position relative to text anchor
+        let dotX, textX;
+        const DOT_SIZE = 7;
+        const DOT_GAP  = 4;
+        const totalDot = DOT_SIZE + DOT_GAP;
+
+        if (align === "center") {
+          ctx.measureText(line.text); // warm up
+          const tw = ctx.measureText(line.text).width;
+          dotX  = ax - tw / 2 - DOT_GAP - DOT_SIZE / 2;
+          textX = ax + DOT_SIZE / 2 + DOT_GAP / 2;
+        } else if (align === "right") {
+          const tw = ctx.measureText(line.text).width;
+          textX = ax;
+          dotX  = ax - tw - DOT_GAP - DOT_SIZE / 2;
+        } else {
+          dotX  = ax + DOT_SIZE / 2;
+          textX = ax + totalDot;
+        }
+
+        const dotCy = ly + LINE_H / 2 - 1;
+
+        if (iconPath) {
+          // Render tiny icon at DOT_SIZE
+          const s = DOT_SIZE / 24;
+          ctx.save();
+          ctx.translate(dotX - DOT_SIZE / 2, dotCy - DOT_SIZE / 2);
+          ctx.scale(s, s);
+          ctx.fillStyle = dotCol || line.color;
+          ctx.fill(new Path2D(iconPath));
+          ctx.restore();
+        } else {
+          // Filled circle dot
+          if (dotCol) {
+            ctx.save();
+            ctx.globalAlpha = line.alpha * 0.9;
+            ctx.fillStyle = dotCol;
+            ctx.beginPath();
+            ctx.arc(dotX, dotCy, DOT_R, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+            // Trigger icon fetch for next frame if we have a key
+            if (line.iconKey && !_iconCache.has(line.iconKey)) {
+              fetchMdiPath(line.iconKey);
+            }
+          }
+        }
+        // Draw text offset from dot
+        ctx.fillStyle = line.color;
+        ctx.textAlign = align === "center" ? "left" : align;
+        ctx.fillText(this._trunc(line.text, 16), textX, ly);
+      } else {
+        ctx.fillStyle = line.color;
+        ctx.fillText(this._trunc(line.text, 18), ax, ly);
+      }
+      ctx.restore();
+    });
   }
 
   _nodeById(id)      { return this._config.nodes.find(n => n.id === id) || null; }
@@ -689,6 +837,12 @@ class NetworkFlowCardEditor extends HTMLElement {
     <ha-selector id="f-active-wan" label="Active WAN entity"></ha-selector>
     <div class="hint-text">Optional: sensor that returns which WAN is active (e.g. "primary" / "backup").
       Pair with <em>active value</em> on each ISP node.</div>
+
+    <div class="sec">Label position</div>
+    <div id="f-meta-pos-wrap"></div>
+    <div class="hint-text">Where to show IP, ping, clients, and secondary status relative to each node box.
+      Can be overridden per node.</div>
+
     <div class="sec">Theme colors</div>
     <div id="theme-colors"></div>
     <div class="sec">Nodes<button class="sec-btn" id="btn-add-node">+ Add node</button></div>
@@ -710,6 +864,18 @@ class NetworkFlowCardEditor extends HTMLElement {
       this._config = { ...this._config, title: e.target.value };
       this._fireChange();
     });
+
+    // Card-level meta_position selector
+    const metaPosWrap = sr.getElementById("f-meta-pos-wrap");
+    const META_POS_OPTS = [
+      {v:"below", l:"Below (default)"}, {v:"above", l:"Above"},
+      {v:"left",  l:"Left"},            {v:"right", l:"Right"},
+    ];
+    metaPosWrap.appendChild(this._sel(
+      "Default label position", META_POS_OPTS,
+      this._config.meta_position || "below",
+      val => { this._config = { ...this._config, meta_position: val }; this._fireChange(); }
+    ));
 
     // Active WAN entity picker
     const activeWanPicker = sr.getElementById("f-active-wan");
@@ -768,6 +934,12 @@ class NetworkFlowCardEditor extends HTMLElement {
     });
     // Sync the card-level active_wan picker
     this._syncActiveWanPicker();
+    // Sync meta_position selector
+    const mpWrap = sr.getElementById("f-meta-pos-wrap");
+    if (mpWrap) {
+      const mpSel = mpWrap.querySelector("select");
+      if (mpSel) mpSel.value = this._config.meta_position || "below";
+    }
 
     // Sync ha-selector values only when not interacting (picker not open)
     sr.querySelectorAll("ha-selector").forEach(sel => {
@@ -997,6 +1169,27 @@ class NetworkFlowCardEditor extends HTMLElement {
         detail.appendChild(sf);
       }
 
+      // Per-node label position override
+      const mpNodeWrap = document.createElement("div");
+      mpNodeWrap.style.marginBottom = "8px";
+      const META_POS_NODE = [
+        {v:"",      l:"Card default"},
+        {v:"below", l:"Below"},  {v:"above", l:"Above"},
+        {v:"left",  l:"Left"},   {v:"right", l:"Right"},
+      ];
+      mpNodeWrap.appendChild(this._sel(
+        "Label position (this node)", META_POS_NODE,
+        node.meta_position || "",
+        val => {
+          const nodes2 = [...this._config.nodes];
+          if (val) nodes2[idx] = { ...nodes2[idx], meta_position: val };
+          else { nodes2[idx] = { ...nodes2[idx] }; delete nodes2[idx].meta_position; }
+          this._config = { ...this._config, nodes: nodes2 };
+          this._fireChange();
+        }
+      ));
+      detail.appendChild(mpNodeWrap);
+
       // Active value — what the active_wan sensor returns for this node to be "active"
       // Only shown on ISP-type nodes (most relevant there, but available on all)
       const avWrap = document.createElement("div");
@@ -1028,11 +1221,16 @@ class NetworkFlowCardEditor extends HTMLElement {
       // Entity bindings
       const esec = document.createElement("div"); esec.className = "subsec"; esec.textContent = "Entity bindings";
       detail.appendChild(esec);
-      ["status","ip","upload","download","ping","clients"].forEach(ek => {
+      ["status","status2","ip","upload","download","ping","clients"].forEach(ek => {
         const sel = document.createElement("ha-selector");
-        sel.label = ek.charAt(0).toUpperCase() + ek.slice(1);
+        const ekLabels = { status: "Status", status2: "Secondary status", ip: "IP address",
+                         upload: "Upload speed", download: "Download speed",
+                         ping: "Ping / latency", clients: "Client count" };
+        sel.label = ekLabels[ek] || (ek.charAt(0).toUpperCase() + ek.slice(1));
         sel.hass = this._hass;
-        sel.selector = ek==="status" ? {entity:{domain:["binary_sensor","sensor"]}} : {entity:{domain:"sensor"}};
+        sel.selector = (ek==="status" || ek==="status2")
+          ? {entity:{domain:["binary_sensor","sensor","input_select","select"]}}
+          : {entity:{domain:"sensor"}};
         sel.value = node.entities?.[ek] || "";
         // Store identifiers so _syncValues can update this element by reference
         sel.dataset.nodeIdx = idx;
