@@ -87,14 +87,22 @@ function resolveEntityValue(hass, entityId, key) {
   const attrs = obj.attributes || {};
   if (state === "unavailable" || state === "unknown") return null;
   switch (key) {
-    case "status": return state;
-    case "ip":     return attrs.ip_address || attrs.ip || state || null;
+    case "status":     return state;
+    case "active_wan": return state; // raw string e.g. "primary" / "backup"
+    case "ip":         return attrs.ip_address || attrs.ip || state || null;
     case "upload": case "download": case "ping": case "clients": {
       const n = parseFloat(state);
       return isNaN(n) ? null : n;
     }
     default: return state;
   }
+}
+
+// Resolve the card-level active_wan entity (returns string or null)
+function resolveActiveWan(hass, config) {
+  const entityId = config.active_wan;
+  if (!hass || !entityId) return null;
+  return resolveEntityValue(hass, entityId, "active_wan");
 }
 
 function resolveNodeState(hass, node) {
@@ -118,6 +126,7 @@ class NetworkFlowRenderer {
     this._config = config;
     this._theme = theme || { ...DEFAULT_THEME };
     this._states = {};
+    this._activeWan = null; // value of card-level active_wan entity
     this._positions = {};
     this._particles = [];
     this._rafId = null;
@@ -130,7 +139,10 @@ class NetworkFlowRenderer {
   start()               { this._spawnParticles(); this._loop(); }
   stop()                { if (this._rafId) cancelAnimationFrame(this._rafId); this._ro.disconnect(); }
   setConfig(cfg, theme) { this._config = cfg; this._theme = theme; this._layout(); this._spawnParticles(); }
+  // activeWan is re-resolved from hass in _syncStates; this resets on config change
+  resetActiveWan() { this._activeWan = null; }
   updateStates(states)  { this._states = states || {}; this._spawnParticles(); }
+  updateActiveWan(val)  { this._activeWan = val || null; this._spawnParticles(); }
 
   handleClick(mx, my) {
     for (const node of this._config.nodes) {
@@ -328,9 +340,31 @@ class NetworkFlowRenderer {
 
   _nodeStatus(node) {
     const st = this._states[node.id] || {};
+
+    // Step 1 — resolve connected/disconnected from status entity
+    let connected = null; // true=connected, false=disconnected, null=unknown
     if (st.status !== undefined && st.status !== null) {
-      if (st.status === "on"  || st.status === true)  return "online";
-      if (st.status === "off" || st.status === false) return "offline";
+      if (st.status === "on"  || st.status === true)  connected = true;
+      else if (st.status === "off" || st.status === false) connected = false;
+      else if (st.status === "offline") connected = false;
+      else if (st.status === "online" || st.status === "standby") connected = true;
+    }
+
+    // Step 2 — offline always wins
+    if (connected === false) return "offline";
+
+    // Step 3 — if active_wan entity is available and this node has active_value,
+    // use that to determine online vs standby
+    if (this._activeWan !== null && node.active_value !== undefined && node.active_value !== "") {
+      if (connected === false) return "offline";
+      // Compare trimmed lowercase so "Primary" matches "primary" etc.
+      const isActive = this._activeWan.trim().toLowerCase() ===
+                       String(node.active_value).trim().toLowerCase();
+      return isActive ? "online" : "standby";
+    }
+
+    // Step 4 — no active_wan logic, fall back to raw status string or config default
+    if (st.status !== undefined && st.status !== null) {
       if (["online","standby","offline"].includes(st.status)) return st.status;
     }
     return node.status || "online";
@@ -393,6 +427,12 @@ class NetworkFlowCardEditor extends HTMLElement {
     if (this._mounted) {
       this.shadowRoot.querySelectorAll("ha-selector, ha-icon-picker").forEach(el => { el.hass = h; });
     }
+  }
+
+  // Sync active_wan picker when setConfig called externally
+  _syncActiveWanPicker() {
+    const el = this.shadowRoot?.getElementById("f-active-wan");
+    if (el) el.value = this._config.active_wan || "";
   }
 
   setConfig(config) {
@@ -482,9 +522,14 @@ class NetworkFlowCardEditor extends HTMLElement {
       .subsec{font-size:10px;font-weight:500;color:var(--secondary-text-color);
               text-transform:uppercase;letter-spacing:.05em;
               margin:12px 0 6px;padding-bottom:3px;border-bottom:1px solid var(--divider-color)}
+      .hint-text{font-size:11px;color:var(--secondary-text-color);
+                 margin:-4px 0 10px;line-height:1.5}
     </style>
     <div class="sec">Card</div>
     <ha-textfield id="f-title" label="Title"></ha-textfield>
+    <ha-selector id="f-active-wan" label="Active WAN entity"></ha-selector>
+    <div class="hint-text">Optional: sensor that returns which WAN is active (e.g. "primary" / "backup").
+      Pair with <em>active value</em> on each ISP node.</div>
     <div class="sec">Theme colors</div>
     <div id="theme-colors"></div>
     <div class="sec">Nodes<button class="sec-btn" id="btn-add-node">+ Add node</button></div>
@@ -504,6 +549,18 @@ class NetworkFlowCardEditor extends HTMLElement {
     });
     titleEl.addEventListener("change", e => {
       this._config = { ...this._config, title: e.target.value };
+      this._fireChange();
+    });
+
+    // Active WAN entity picker
+    const activeWanPicker = sr.getElementById("f-active-wan");
+    activeWanPicker.hass = this._hass;
+    activeWanPicker.selector = { entity: { domain: "sensor" } };
+    activeWanPicker.value = this._config.active_wan || "";
+    activeWanPicker.addEventListener("value-changed", e => {
+      const val = e.detail.value || "";
+      this._config = { ...this._config, active_wan: val || undefined };
+      if (!val) delete this._config.active_wan;
       this._fireChange();
     });
 
@@ -550,6 +607,9 @@ class NetworkFlowCardEditor extends HTMLElement {
       const el = sr.querySelector(`[data-theme="${f.key}"]`);
       if (el) el.value = theme[f.key] || "#888888";
     });
+    // Sync the card-level active_wan picker
+    this._syncActiveWanPicker();
+
     // Sync ha-selector values only when not interacting (picker not open)
     sr.querySelectorAll("ha-selector").forEach(sel => {
       if (sel._pendingInteraction) return;
@@ -714,6 +774,34 @@ class NetworkFlowCardEditor extends HTMLElement {
         {v:"online",l:"Online"},{v:"standby",l:"Standby"},{v:"offline",l:"Offline"},
       ], node.status||"online", val => this._wNodeField(idx, "status", val)));
       detail.appendChild(sg);
+
+      // Active value — what the active_wan sensor returns for this node to be "active"
+      // Only shown on ISP-type nodes (most relevant there, but available on all)
+      const avWrap = document.createElement("div");
+      avWrap.style.cssText = "margin-bottom:8px;padding:10px 12px;background:var(--secondary-background-color);border-radius:8px;";
+      const avLabel = document.createElement("div");
+      avLabel.style.cssText = "font-size:11px;color:var(--secondary-text-color);margin-bottom:6px;line-height:1.4";
+      avLabel.textContent = "Active WAN value — what the active_wan sensor returns when this node is the active connection";
+      const avField = document.createElement("ha-textfield");
+      avField.label = "Active value (e.g. "primary", "backup")";
+      avField.value = node.active_value || "";
+      avField.style.width = "100%";
+      avField.addEventListener("input", e => {
+        const nodes2 = [...this._config.nodes];
+        nodes2[idx] = { ...nodes2[idx], active_value: e.target.value };
+        this._config = { ...this._config, nodes: nodes2 };
+        clearTimeout(this._textTimer);
+        this._textTimer = setTimeout(() => this._fireChange(), 400);
+      });
+      avField.addEventListener("change", e => {
+        const nodes2 = [...this._config.nodes];
+        nodes2[idx] = { ...nodes2[idx], active_value: e.target.value };
+        this._config = { ...this._config, nodes: nodes2 };
+        this._fireChange();
+      });
+      avWrap.appendChild(avLabel);
+      avWrap.appendChild(avField);
+      detail.appendChild(avWrap);
 
       // Entity bindings
       const esec = document.createElement("div"); esec.className = "subsec"; esec.textContent = "Entity bindings";
@@ -940,7 +1028,11 @@ class NetworkFlowCard extends HTMLElement {
       states[node.id] = resolveNodeState(this._hass, node);
     }
     this._states = states;
-    if (this._renderer) this._renderer.updateStates(states);
+    const activeWan = resolveActiveWan(this._hass, this._config);
+    if (this._renderer) {
+      this._renderer.updateStates(states);
+      this._renderer.updateActiveWan(activeWan);
+    }
   }
 
   _build() {
