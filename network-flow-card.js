@@ -271,18 +271,6 @@ class NetworkFlowRenderer {
   updateStates(states)  { this._states = states || {}; this._spawnParticles(); }
   updateActiveWan(val)  { this._activeWan = val || null; this._spawnParticles(); }
 
-  handleClick(mx, my) {
-    for (const node of this._config.nodes) {
-      const pos = this._positions[node.id];
-      if (!pos) continue;
-      if (mx >= pos.x - NODE_W/2 && mx <= pos.x + NODE_W/2 && my >= pos.y && my <= pos.y + NODE_H) {
-        this._canvas.dispatchEvent(new CustomEvent("node-clicked", { detail: { nodeId: node.id, node }, bubbles: true, composed: true }));
-        return node.id;
-      }
-    }
-    return null;
-  }
-
   _layout() {
     const W = this._canvas.offsetWidth || 600, H = 460;
     this._W = W; this._H = H;
@@ -332,7 +320,7 @@ class NetworkFlowRenderer {
   _loop() { this._rafId = requestAnimationFrame(() => { this._draw(); this._loop(); }); }
 
   _draw() {
-    this._dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    this._resolveThemeColors();
     const ctx = this._ctx;
     ctx.clearRect(0, 0, this._W, this._H);
     this._drawLinks();
@@ -340,6 +328,26 @@ class NetworkFlowRenderer {
     this._drawLinkLabels();
     this._config.nodes.forEach(n => this._drawNode(n));
     this._updateTs();
+  }
+
+  // Read resolved CSS variable values from the HA host element.
+  // Called once per frame — getComputedStyle is cheap on a single element.
+  // Falls back to sensible defaults so the card works even outside HA.
+  _resolveThemeColors() {
+    const host = this._canvas.getRootNode()?.host;
+    const cs = host ? getComputedStyle(host) : null;
+    const get = (v, fb) => cs ? (cs.getPropertyValue(v).trim() || fb) : fb;
+
+    this._colors = {
+      cardBg:    get("--card-background-color",    get("--ha-card-background", "#ffffff")),
+      textPri:   get("--primary-text-color",        "#1c1c1e"),
+      textSec:   get("--secondary-text-color",      "#6b6b6b"),
+      textDis:   get("--disabled-text-color",       "#9a9a9a"),
+      divider:   get("--divider-color",             "rgba(0,0,0,0.12)"),
+      fontFamily:get("--mdc-typography-body1-font-family",
+                   get("--paper-font-body1_-_font-family", "system-ui")),
+      fontMono:  get("--code-font-family",          "monospace"),
+    };
   }
 
   _drawLinks() {
@@ -374,9 +382,10 @@ class NetworkFlowRenderer {
       const dx = p1.x - p0.x, dy = p1.y - p0.y, len = Math.sqrt(dx*dx + dy*dy) || 1;
       const ox = (-dy / len) * 16, oy = (dx / len) * 16;
       const ctx = this._ctx;
-      ctx.save(); ctx.font = "500 10px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      const _ff = (this._colors?.fontFamily || "system-ui");
+      ctx.save(); ctx.font = `500 10px ${_ff}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       if (standby) {
-        ctx.globalAlpha = 0.6; ctx.fillStyle = this._dark ? "#c78a36" : "#92400e";
+        ctx.globalAlpha = 0.6; ctx.fillStyle = this._theme.standby || "#f59e0b";
         ctx.fillText("standby", mx + ox, my + oy);
       } else {
         const { up, dn } = resolveLinkSpeeds(fn, tn, this._states);
@@ -408,9 +417,10 @@ class NetworkFlowRenderer {
     const offline = status === "offline", standby = status === "standby";
     const sc  = node.color?.border || node.color?.status_bar || this._statusColor(status);
     const bar = node.color?.status_bar || this._statusColor(status);
-    const bg  = node.color?.background || (this._dark ? "#1e1e20" : "#ffffff");
-    const tm  = this._dark ? "#e5e5e5" : "#1c1c1e";
-    const ts2 = this._dark ? "#666"    : "#999";
+    const c   = this._colors || {};
+    const bg  = node.color?.background || c.cardBg  || "#ffffff";
+    const tm  = c.textPri  || "#1c1c1e";
+    const ts2 = c.textSec  || "#6b6b6b";
     const ctx = this._ctx;
     ctx.save(); ctx.globalAlpha = offline ? 0.38 : 1;
     this._rrect(x, y, NODE_W, NODE_H, RX); ctx.fillStyle = bg; ctx.fill();
@@ -428,9 +438,10 @@ class NetworkFlowRenderer {
       // Not in cache yet — trigger fetch (result lands on next animation frame)
       fetchMdiPath(node.icon);
     }
-    ctx.fillStyle = tm; ctx.font = "500 11px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    const ff = (this._colors?.fontFamily || "system-ui");
+    ctx.fillStyle = tm; ctx.font = `500 11px ${ff}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText(this._trunc(node.label, 12), pos.x, y + 38);
-    if (node.sublabel) { ctx.fillStyle = ts2; ctx.font = "400 9px system-ui"; ctx.fillText(this._trunc(node.sublabel, 14), pos.x, y + 51); }
+    if (node.sublabel) { ctx.fillStyle = ts2; ctx.font = `400 9px ${ff}`; ctx.fillText(this._trunc(node.sublabel, 14), pos.x, y + 51); }
     ctx.restore();
     this._drawMeta(node, pos, status);
   }
@@ -439,24 +450,28 @@ class NetworkFlowRenderer {
     const ctx = this._ctx;
     const offline = status === "offline", standby = status === "standby";
     const st = this._states[node.id] || {};
+    const c  = this._colors || {};
+    const ff  = c.fontFamily || "system-ui";
+    const ffm = c.fontMono   || "monospace";
+    const muted = c.textSec  || "#6b6b6b";
     let ly = pos.y + NODE_H + 11;
     const ip = st.ip ?? node.data?.ip;
     if (ip && !offline) {
       ctx.save(); ctx.globalAlpha = standby ? 0.45 : 0.7;
-      ctx.font = "400 9px monospace"; ctx.fillStyle = node.color?.ip_text || (this._dark ? "#666" : "#999");
+      ctx.font = `400 9px ${ffm}`; ctx.fillStyle = node.color?.ip_text || muted;
       ctx.textAlign = "center"; ctx.textBaseline = "top";
       ctx.fillText(ip, pos.x, ly); ctx.restore(); ly += 13;
     }
     const ping = st.ping ?? node.data?.ping;
     if (ping && !offline && !standby) {
-      ctx.save(); ctx.globalAlpha = 0.5; ctx.font = "400 9px system-ui";
-      ctx.fillStyle = this._dark ? "#444" : "#bbb"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+      ctx.save(); ctx.globalAlpha = 0.5; ctx.font = `400 9px ${ff}`;
+      ctx.fillStyle = muted; ctx.textAlign = "center"; ctx.textBaseline = "top";
       ctx.fillText(ping + "ms", pos.x, ly); ctx.restore(); ly += 13;
     }
     const clients = st.clients ?? node.data?.clients;
     if (clients && !offline) {
-      ctx.save(); ctx.globalAlpha = 0.55; ctx.font = "400 9px system-ui";
-      ctx.fillStyle = this._dark ? "#444" : "#bbb"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+      ctx.save(); ctx.globalAlpha = 0.55; ctx.font = `400 9px ${ff}`;
+      ctx.fillStyle = muted; ctx.textAlign = "center"; ctx.textBaseline = "top";
       ctx.fillText(clients + " clients", pos.x, ly); ctx.restore();
     }
   }
@@ -525,7 +540,22 @@ class NetworkFlowRenderer {
   _updateTs() {
     const host = this._canvas.getRootNode()?.host;
     const el = host?.shadowRoot?.querySelector("#nfc-ts");
-    if (el) el.textContent = new Date().toLocaleTimeString();
+    if (!el) return;
+    const hass = host?._hass;
+    const locale = hass?.locale;
+    if (locale) {
+      // Use HA locale: respects user's 12h/24h preference and language
+      const opts = {
+        hour: "numeric", minute: "2-digit",
+        hour12: locale.time_format === "12" ||
+                (locale.time_format === "language" &&
+                 new Intl.DateTimeFormat(locale.language, { hour: "numeric" })
+                   .resolvedOptions().hour12),
+      };
+      el.textContent = new Intl.DateTimeFormat(locale.language || "default", opts).format(new Date());
+    } else {
+      el.textContent = new Date().toLocaleTimeString();
+    }
   }
 }
 
@@ -904,6 +934,69 @@ class NetworkFlowCardEditor extends HTMLElement {
       ], node.status||"online", val => this._wNodeField(idx, "status", val)));
       detail.appendChild(sg);
 
+      // Tap / hold actions
+      const actSec = document.createElement("div"); actSec.className = "subsec"; actSec.textContent = "Actions";
+      detail.appendChild(actSec);
+
+      const actGrid = document.createElement("div"); actGrid.className = "two";
+      const TAP_ACTIONS = [
+        {v:"more-info", l:"More info"},
+        {v:"navigate",  l:"Navigate"},
+        {v:"url",       l:"Open URL"},
+        {v:"call-service", l:"Call service"},
+        {v:"none",      l:"None"},
+      ];
+      actGrid.appendChild(this._sel("Tap action", TAP_ACTIONS,
+        node.tap_action?.action || "more-info",
+        val => this._wNodeField(idx, "tap_action", { ...(node.tap_action||{}), action: val })
+      ));
+      actGrid.appendChild(this._sel("Hold action", TAP_ACTIONS,
+        node.hold_action?.action || "none",
+        val => this._wNodeField(idx, "hold_action", { ...(node.hold_action||{}), action: val })
+      ));
+      detail.appendChild(actGrid);
+
+      // Show entity/path/url/service field depending on tap action selected
+      const tapAction = node.tap_action?.action || "more-info";
+      if (tapAction === "more-info") {
+        const ef = document.createElement("ha-selector");
+        ef.label = "Entity (optional — defaults to status entity)";
+        ef.hass = this._hass;
+        ef.selector = { entity: {} };
+        ef.value = node.tap_action?.entity || "";
+        ef.addEventListener("value-changed", e => {
+          this._wNodeField(idx, "tap_action", { ...(node.tap_action||{action:"more-info"}), entity: e.detail.value });
+        });
+        detail.appendChild(ef);
+      } else if (tapAction === "navigate") {
+        const nf = document.createElement("ha-textfield");
+        nf.label = "Navigation path (e.g. /lovelace/network)";
+        nf.value = node.tap_action?.navigation_path || "";
+        nf.style.width = "100%"; nf.style.display = "block"; nf.style.marginBottom = "8px";
+        nf.addEventListener("input", e => {
+          this._wNodeField(idx, "tap_action", { ...(node.tap_action||{action:"navigate"}), navigation_path: e.target.value });
+        });
+        detail.appendChild(nf);
+      } else if (tapAction === "url") {
+        const uf = document.createElement("ha-textfield");
+        uf.label = "URL";
+        uf.value = node.tap_action?.url_path || "";
+        uf.style.width = "100%"; uf.style.display = "block"; uf.style.marginBottom = "8px";
+        uf.addEventListener("input", e => {
+          this._wNodeField(idx, "tap_action", { ...(node.tap_action||{action:"url"}), url_path: e.target.value });
+        });
+        detail.appendChild(uf);
+      } else if (tapAction === "call-service") {
+        const sf = document.createElement("ha-textfield");
+        sf.label = "Service (e.g. light.turn_on)";
+        sf.value = node.tap_action?.service || "";
+        sf.style.width = "100%"; sf.style.display = "block"; sf.style.marginBottom = "8px";
+        sf.addEventListener("input", e => {
+          this._wNodeField(idx, "tap_action", { ...(node.tap_action||{action:"call-service"}), service: e.target.value });
+        });
+        detail.appendChild(sf);
+      }
+
       // Active value — what the active_wan sensor returns for this node to be "active"
       // Only shown on ISP-type nodes (most relevant there, but available on all)
       const avWrap = document.createElement("div");
@@ -1203,15 +1296,63 @@ class NetworkFlowCard extends HTMLElement {
     this._renderer.start();
     canvas.addEventListener("click", e => {
       const rect = canvas.getBoundingClientRect();
-      this._renderer.handleClick(e.clientX - rect.left, e.clientY - rect.top);
+      this._renderer.handleClick(e.clientX - rect.left, e.clientY - rect.top, "tap");
     });
-    canvas.addEventListener("node-clicked", e => {
-      const node = e.detail.node;
-      if (node.entities?.status && this._hass) {
-        const event = new CustomEvent("hass-more-info", { detail: { entityId: node.entities.status }, bubbles: true, composed: true });
-        this.dispatchEvent(event);
+    canvas.addEventListener("contextmenu", e => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      this._renderer.handleClick(e.clientX - rect.left, e.clientY - rect.top, "hold");
+    });
+    canvas.addEventListener("node-action", e => {
+      this._handleNodeAction(e.detail.node, e.detail.actionType);
+    });
+  }
+
+  // Handle tap/hold actions on a node.
+  // Supports the same action types as other HA cards via the standard
+  // hass-action / hass-more-info event protocol.
+  _handleNodeAction(node, actionType) {
+    const action = actionType === "hold"
+      ? (node.hold_action || { action: "none" })
+      : (node.tap_action  || { action: "more-info" });
+
+    switch (action.action) {
+      case "more-info": {
+        // Default: open more-info for the most relevant entity on this node.
+        // Prefers tap_action.entity if set, otherwise falls back through entity list.
+        const entityId = action.entity ||
+          node.entities?.status || node.entities?.upload ||
+          node.entities?.ip || null;
+        if (entityId && this._hass) {
+          this.dispatchEvent(new CustomEvent("hass-more-info", {
+            detail: { entityId },
+            bubbles: true, composed: true,
+          }));
+        }
+        break;
       }
-    });
+      case "navigate":
+        if (action.navigation_path) {
+          window.history.pushState(null, "", action.navigation_path);
+          window.dispatchEvent(new CustomEvent("location-changed", {
+            detail: { replace: false }, bubbles: true, composed: true,
+          }));
+        }
+        break;
+      case "url":
+        if (action.url_path) window.open(action.url_path, action.url_target || "_blank");
+        break;
+      case "call-service": {
+        if (action.service && this._hass) {
+          const [domain, service] = action.service.split(".");
+          this._hass.callService(domain, service, action.service_data || {});
+        }
+        break;
+      }
+      case "none":
+      default:
+        break;
+    }
   }
 
   getCardSize() { return 5; }

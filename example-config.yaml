@@ -1,0 +1,195 @@
+# ─── network-flow-card — full example configuration ──────────────────────────
+# Copy this into your Lovelace dashboard YAML (raw config editor)
+# or use the visual editor to configure each field.
+#
+# Prerequisites:
+#   1. Copy dist/network-flow-card.js to /config/www/network-flow-card.js
+#   2. Add to configuration.yaml (or via UI: Settings → Dashboards → Resources):
+#        lovelace:
+#          resources:
+#            - url: /local/network-flow-card.js
+#              type: module
+
+type: custom:network-flow-card
+title: Network flow
+
+# ── Global theme ──────────────────────────────────────────────────────────────
+# All colors are optional — shown values are the built-in defaults.
+# Override any subset; unset keys fall back to the defaults.
+theme:
+  # Status colors (node borders, status bar, legend)
+  online:   "#22c55e"   # green
+  standby:  "#f59e0b"   # amber
+  offline:  "#ef4444"   # red
+  # Flow particle / speed label colors
+  upload:   "#378add"   # blue   (particles travel upstream: device → WAN)
+  download: "#d85a30"   # orange (particles travel downstream: WAN → device)
+  # Link line colors
+  link_active:  "#888780"
+  link_standby: "#f59e0b"
+  link_offline: "#d3d1c7"
+
+# ── Active WAN (optional) ─────────────────────────────────────────────────────
+# A sensor that returns which WAN is currently active as a string.
+# Pair with active_value on each ISP node.
+# Priority: connected=off → offline  |  connected=on + active_value match → online
+#                                    |  connected=on + no match → standby
+#
+# Example template sensor:
+#   template:
+#     - sensor:
+#         - name: active_wan_interface
+#           state: >
+#             {% if is_state('binary_sensor.wan1_up', 'on') and
+#                  states('sensor.wan1_gateway_status') == 'reachable' %}
+#               primary
+#             {% else %}
+#               backup
+#             {% endif %}
+active_wan: sensor.active_wan_interface
+
+# ── Nodes ─────────────────────────────────────────────────────────────────────
+nodes:
+
+  # ── ISP nodes (top row) ────────────────────────────────────────────────────
+  - id: wan1
+    label: Primary ISP
+    sublabel: Fiber · WAN1
+    icon: mdi:web
+    type: isp                   # isp | router | switch | interface | device
+    status: online              # fallback if entity is unavailable
+    entities:
+      status:   binary_sensor.wan1_up         # "on" = online, "off" = offline
+      ip:       sensor.wan1_ip                # public IP string
+      upload:   sensor.wan1_upload_mbps       # numeric, Mbps
+      download: sensor.wan1_download_mbps     # numeric, Mbps
+      ping:     sensor.wan1_ping_ms           # numeric, ms
+
+  - id: wan2
+    label: Backup ISP
+    sublabel: LTE · WAN2
+    icon: mdi:web
+    type: isp
+    status: standby
+    color:                      # per-node color overrides (all optional)
+      border:     "#f59e0b"     # override border color
+      status_bar: "#f59e0b"     # override top accent bar
+    entities:
+      status:   binary_sensor.wan2_up
+      ip:       sensor.wan2_ip
+      upload:   sensor.wan2_upload_mbps
+      download: sensor.wan2_download_mbps
+
+  # ── Router / Firewall (middle) ─────────────────────────────────────────────
+  - id: router
+    label: Router
+    sublabel: OPNsense
+    icon: mdi:router-network
+    type: router
+    entities:
+      status: binary_sensor.router_online
+      ip:     sensor.router_lan_ip          # LAN-side IP
+      # cpu:  sensor.router_cpu_pct         # optional — not displayed on card
+
+  # ── Downstream interfaces (bottom row) ─────────────────────────────────────
+  - id: lan
+    label: LAN
+    sublabel: Wired · 1G
+    icon: mdi:switch
+    type: interface
+    parent: router              # used for hierarchy layout (future feature)
+    entities:
+      status:   binary_sensor.lan_status
+      ip:       sensor.lan_subnet            # e.g. "192.168.1.0/24"
+      upload:   sensor.lan_upload_mbps
+      download: sensor.lan_download_mbps
+      clients:  sensor.lan_client_count
+
+  - id: wifi24
+    label: WiFi 2.4G
+    icon: mdi:wifi
+    type: interface
+    parent: router
+    entities:
+      status:   binary_sensor.wifi24_status
+      ip:       sensor.wifi24_subnet
+      upload:   sensor.wifi24_upload_mbps
+      download: sensor.wifi24_download_mbps
+      clients:  sensor.wifi24_clients
+
+  - id: wifi5
+    label: WiFi 5G
+    icon: mdi:wifi
+    type: interface
+    parent: router
+    entities:
+      status:   binary_sensor.wifi5_status
+      ip:       sensor.wifi5_subnet
+      upload:   sensor.wifi5_upload_mbps
+      download: sensor.wifi5_download_mbps
+      clients:  sensor.wifi5_clients
+
+  - id: wifi6
+    label: WiFi 6E
+    icon: mdi:access-point
+    type: interface
+    parent: router
+    entities:
+      status:   binary_sensor.wifi6_status
+      ip:       sensor.wifi6_subnet
+      upload:   sensor.wifi6_upload_mbps
+      download: sensor.wifi6_download_mbps
+      clients:  sensor.wifi6_clients
+
+  - id: vpn
+    label: VPN
+    sublabel: WireGuard
+    icon: mdi:vpn
+    type: interface
+    parent: router
+    color:
+      border:     "#a855f7"    # purple border for VPN — distinct at a glance
+      status_bar: "#a855f7"
+    entities:
+      status:   binary_sensor.vpn_status
+      ip:       sensor.vpn_subnet
+      upload:   sensor.vpn_upload_mbps
+      download: sensor.vpn_download_mbps
+      clients:  sensor.vpn_peers            # connected WireGuard peers
+
+# ── Links ──────────────────────────────────────────────────────────────────────
+# Each link draws a connection line and animates flow particles between nodes.
+# "from" and "to" must match node ids above.
+links:
+  - { from: wan1,   to: router }
+  - { from: wan2,   to: router }
+  - { from: router, to: lan    }
+  - { from: router, to: wifi24 }
+  - { from: router, to: wifi5  }
+  - { from: router, to: wifi6  }
+  - { from: router, to: vpn    }
+
+# ── Tap / hold actions (optional, per node) ───────────────────────────────────
+# tap_action  — fires on single tap  (default: more-info on status entity)
+# hold_action — fires on right-click (default: none)
+#
+# action types: more-info | navigate | url | call-service | none
+#
+# Examples:
+#
+#   - id: router
+#     tap_action:
+#       action: more-info
+#       entity: sensor.router_cpu_pct   # override which entity opens
+#
+#   - id: vpn
+#     tap_action:
+#       action: navigate
+#       navigation_path: /lovelace/vpn-detail
+#
+#   - id: lan
+#     tap_action:
+#       action: call-service
+#       service: script.ping_lan
+#     hold_action:
+#       action: more-info
