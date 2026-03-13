@@ -461,8 +461,16 @@ class NetworkFlowCardEditor extends HTMLElement {
       .color-lbl{flex:1;font-size:13px;color:var(--primary-text-color)}
       .swatch{width:36px;height:28px;border:none;border-radius:6px;cursor:pointer;padding:2px}
       .link-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
-      .link-row ha-select{flex:1}
-      ha-select{display:block;margin-bottom:8px}
+      .link-row .nfc-sel{flex:1}
+      .nfc-sel-wrap{display:block;margin-bottom:8px;position:relative}
+      .nfc-sel-wrap label{display:block;font-size:12px;color:var(--secondary-text-color);margin-bottom:4px}
+      .nfc-sel{width:100%;padding:8px 32px 8px 12px;font-size:14px;font-family:inherit;
+               color:var(--primary-text-color);background:var(--card-background-color,#fff);
+               border:1px solid var(--divider-color);border-radius:4px;cursor:pointer;
+               appearance:none;-webkit-appearance:none}
+      .nfc-sel:focus{outline:2px solid var(--primary-color);outline-offset:-1px}
+      .nfc-sel-wrap::after{content:"▾";position:absolute;right:10px;bottom:10px;
+                           pointer-events:none;color:var(--secondary-text-color);font-size:12px}
       ha-selector{display:block;margin-bottom:8px}
       .arrow{color:var(--secondary-text-color);flex-shrink:0}
       .subsec{font-size:10px;font-weight:500;color:var(--secondary-text-color);
@@ -751,74 +759,58 @@ class NetworkFlowCardEditor extends HTMLElement {
     });
   }
 
-  // Helper: create a ha-select element ─────────────────────────────────────
-  // Strategy: attach an "action" listener directly to each mwc-list-item.
-  // "action" fires on the item itself when clicked — before mwc-select's
-  // internal state updates — and gives us the item's value directly with no
-  // index indirection. This avoids every known mwc-select timing quirk:
-  //   • No reliance on e.detail.index + stale items array
-  //   • No reliance on sel.value being updated yet
-  //   • No label-vs-value confusion (each item knows its own .value)
-  //   • Works correctly even when node IDs are renamed between rebuilds
+  // Helper: native <select> wrapper ────────────────────────────────────────
+  // Uses a plain HTML <select> instead of mwc/ha-select.
+  // mwc-select has deep async timing bugs — its value property, selected event,
+  // and shadow DOM structure make reliable value reading nearly impossible.
+  // A native <select> fires a synchronous "change" event with e.target.value
+  // already set correctly. No timing workarounds needed at all.
+  // Styled via .nfc-sel / .nfc-sel-wrap CSS to match HA's card editor aesthetic.
 
   _sel(label, options, current, onChange) {
-    const sel = document.createElement("ha-select");
-    sel.label = label;
+    const wrap = document.createElement("div");
+    wrap.className = "nfc-sel-wrap";
+
+    if (label) {
+      const lbl = document.createElement("label");
+      lbl.textContent = label;
+      wrap.appendChild(lbl);
+    }
+
+    const sel = document.createElement("select");
+    sel.className = "nfc-sel";
 
     options.forEach(o => {
-      const item = document.createElement("mwc-list-item");
-      item.value = o.v;
-      item.textContent = o.l;
-
-      // "action" fires on the item when the user clicks it — value is o.v,
-      // captured in the closure at build time, always correct regardless of
-      // what mwc-select's internal state is doing
-      item.addEventListener("click", () => {
-        if (!this._interacting) return; // guard against programmatic clicks
-        sel._pendingValue = o.v;
-      });
-
-      sel.appendChild(item);
+      const opt = document.createElement("option");
+      opt.value = o.v;
+      opt.textContent = o.l;
+      if (o.v === current) opt.selected = true;
+      sel.appendChild(opt);
     });
 
-    // Set initial displayed value after mwc upgrades its internal list
-    requestAnimationFrame(() => { sel.value = current; });
-    sel.dataset.currentVal = current;
-    sel._pendingValue = null;
-
-    // "opened" — user clicked the select, menu is opening
-    sel.addEventListener("opened", () => {
+    // Native change event — synchronous, value is always correct
+    sel.addEventListener("change", e => {
+      // Set _interacting briefly so HA's setConfig callback doesn't
+      // clobber the select's displayed value mid-interaction
       this._interacting = true;
-      sel._pendingValue = null;
       clearTimeout(this._interactTimer);
-    });
-
-    // "closed" — menu finished closing (after pick or dismiss)
-    sel.addEventListener("closed", () => {
-      // Hold _interacting lock until HA's config-changed round-trip settles
       this._interactTimer = setTimeout(() => { this._interacting = false; }, 350);
-
-      const picked = sel._pendingValue;
-      sel._pendingValue = null;
-
-      if (picked !== null && picked !== undefined && picked !== sel.dataset.currentVal) {
-        sel.dataset.currentVal = picked;
-        onChange(picked);
-        // Re-assert the value in case HA's setConfig callback tried to reset it
-        requestAnimationFrame(() => { sel.value = picked; });
-      } else {
-        // User dismissed without picking — restore the last known good value
-        requestAnimationFrame(() => { sel.value = sel.dataset.currentVal; });
-      }
+      onChange(e.target.value);
     });
 
-    return sel;
+    wrap.appendChild(sel);
+    // Expose .value and .dataset on wrap so call sites can treat it uniformly
+    Object.defineProperty(wrap, "value", {
+      get: () => sel.value,
+      set: (v) => { sel.value = v; },
+    });
+    wrap.dataset.selEl = "true";
+    return wrap;
   }
 
   // Update a select's displayed value from outside without firing onChange
-  _setSelValue(sel, val) {
-    sel.dataset.currentVal = val;
-    requestAnimationFrame(() => { sel.value = val; });
+  _setSelValue(selWrap, val) {
+    selWrap.value = val;
   }
 }
 customElements.define("network-flow-card-editor", NetworkFlowCardEditor);
