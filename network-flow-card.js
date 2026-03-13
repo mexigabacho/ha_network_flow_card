@@ -390,9 +390,8 @@ class NetworkFlowCardEditor extends HTMLElement {
 
   set hass(h) {
     this._hass = h;
-    // Push updated hass into any live ha-selector elements without rebuilding
     if (this._mounted) {
-      this.shadowRoot.querySelectorAll("ha-selector").forEach(el => { el.hass = h; });
+      this.shadowRoot.querySelectorAll("ha-selector, ha-icon-picker").forEach(el => { el.hass = h; });
     }
   }
 
@@ -457,9 +456,16 @@ class NetworkFlowCardEditor extends HTMLElement {
       .node-detail.open{display:block}
       .del-btn{font-size:12px;color:var(--error-color);background:none;border:none;
                cursor:pointer;font-family:inherit;float:right;margin-bottom:8px}
-      .color-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+      .color-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
       .color-lbl{flex:1;font-size:13px;color:var(--primary-text-color)}
-      .swatch{width:36px;height:28px;border:none;border-radius:6px;cursor:pointer;padding:2px}
+      .swatch{width:36px;height:28px;border:none;border-radius:6px;cursor:pointer;padding:2px;flex-shrink:0}
+      .swatch.unset{opacity:0.35;outline:2px dashed var(--divider-color);outline-offset:2px}
+      .clr-btn{font-size:11px;color:var(--secondary-text-color);background:none;border:none;
+               cursor:pointer;padding:2px 4px;border-radius:4px;line-height:1;flex-shrink:0;
+               opacity:0.6;font-family:inherit}
+      .clr-btn:hover{color:var(--error-color);opacity:1}
+      .clr-btn.hidden{visibility:hidden}
+      ha-icon-picker{display:block;width:100%;margin-bottom:8px}
       .link-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
       .link-row .nfc-sel{flex:1}
       .nfc-sel-wrap{display:block;margin-bottom:8px;position:relative}
@@ -560,19 +566,45 @@ class NetworkFlowCardEditor extends HTMLElement {
 
   _buildThemeColors() {
     const container = this.shadowRoot.getElementById("theme-colors");
-    const theme = mergeTheme(DEFAULT_THEME, this._config.theme || {});
+    const userTheme = this._config.theme || {};
     THEME_FIELDS.forEach(f => {
+      const isOverridden = userTheme[f.key] !== undefined && userTheme[f.key] !== "";
       const row = document.createElement("div");
       row.className = "color-row";
+
       const lbl = document.createElement("span");
       lbl.className = "color-lbl";
       lbl.textContent = f.label;
+
       const sw = document.createElement("input");
-      sw.type = "color"; sw.className = "swatch";
-      sw.value = theme[f.key] || "#888888";
+      sw.type = "color"; sw.className = "swatch" + (isOverridden ? "" : " unset");
+      sw.value = userTheme[f.key] || DEFAULT_THEME[f.key];
       sw.dataset.theme = f.key;
-      sw.addEventListener("input", e => this._wTheme(e.target.dataset.theme, e.target.value));
-      row.appendChild(lbl); row.appendChild(sw);
+      sw.title = isOverridden ? "Custom color (click to change)" : "Using default — click to override";
+      sw.addEventListener("input", e => {
+        e.target.classList.remove("unset");
+        e.target.title = "Custom color (click to change)";
+        resetBtn.classList.remove("hidden");
+        this._wTheme(e.target.dataset.theme, e.target.value);
+      });
+
+      // Reset button — removes the override, falls back to default
+      const resetBtn = document.createElement("button");
+      resetBtn.className = "clr-btn" + (isOverridden ? "" : " hidden");
+      resetBtn.textContent = "↺ default";
+      resetBtn.title = "Remove override, use default color";
+      resetBtn.addEventListener("click", () => {
+        const theme = { ...(this._config.theme || {}) };
+        delete theme[f.key];
+        this._config = { ...this._config, theme };
+        this._fireChange();
+        sw.value = DEFAULT_THEME[f.key];
+        sw.classList.add("unset");
+        sw.title = "Using default — click to override";
+        resetBtn.classList.add("hidden");
+      });
+
+      row.appendChild(lbl); row.appendChild(sw); row.appendChild(resetBtn);
       container.appendChild(row);
     });
   }
@@ -620,13 +652,12 @@ class NetworkFlowCardEditor extends HTMLElement {
       });
       detail.appendChild(delBtn);
 
-      // Text fields in a 2-col grid — each one is stable, no rebuild on input
+      // Text fields — id, label, sublabel in a 2-col grid
       const grid = document.createElement("div"); grid.className = "two";
       [
         { key:"id",       label:"ID (unique)" },
         { key:"label",    label:"Label" },
         { key:"sublabel", label:"Sublabel" },
-        { key:"icon",     label:"Icon (mdi:...)" },
       ].forEach(f => {
         const tf = document.createElement("ha-textfield");
         tf.label = f.label; tf.value = node[f.key] || "";
@@ -634,14 +665,9 @@ class NetworkFlowCardEditor extends HTMLElement {
           const nodes2 = [...this._config.nodes];
           nodes2[idx] = { ...nodes2[idx], [f.key]: e.target.value };
           this._config = { ...this._config, nodes: nodes2 };
-          // Live-update the node row label/icon without a rebuild
           if (f.key === "label") {
             const el = container.querySelectorAll(".node-lbl")[idx];
             if (el) el.textContent = e.target.value || node.id || `Node ${idx+1}`;
-          }
-          if (f.key === "icon") {
-            const el = container.querySelectorAll(".node-row ha-icon")[idx];
-            if (el) el.setAttribute("icon", e.target.value || "mdi:help-circle");
           }
           clearTimeout(this._textTimer);
           this._textTimer = setTimeout(() => this._fireChange(), 400);
@@ -655,6 +681,24 @@ class NetworkFlowCardEditor extends HTMLElement {
         grid.appendChild(tf);
       });
       detail.appendChild(grid);
+
+      // Icon picker — ha-icon-picker gives the full HA MDI search dialog
+      const iconPicker = document.createElement("ha-icon-picker");
+      iconPicker.label = "Icon";
+      iconPicker.value = node.icon || "";
+      iconPicker.placeholder = "mdi:help-circle";
+      iconPicker.hass = this._hass;
+      iconPicker.addEventListener("value-changed", e => {
+        const newIcon = e.detail.value || "";
+        const nodes2 = [...this._config.nodes];
+        nodes2[idx] = { ...nodes2[idx], icon: newIcon };
+        this._config = { ...this._config, nodes: nodes2 };
+        // Update the icon preview in the collapsed node row immediately
+        const el = container.querySelectorAll(".node-row ha-icon")[idx];
+        if (el) el.setAttribute("icon", newIcon || "mdi:help-circle");
+        this._fireChange();
+      });
+      detail.appendChild(iconPicker);
 
       // Type + Status selects
       const sg = document.createElement("div"); sg.className = "two";
@@ -716,16 +760,49 @@ class NetworkFlowCardEditor extends HTMLElement {
         detail.appendChild(sel);
       });
 
-      // Color overrides
+      // Color overrides — each has a swatch + clear button
+      // Clear removes the key entirely so the global theme takes over
       const csec = document.createElement("div"); csec.className = "subsec"; csec.textContent = "Color overrides";
       detail.appendChild(csec);
       NODE_COLOR_FIELDS.forEach(cf => {
+        const isSet = node.color?.[cf.key] !== undefined && node.color[cf.key] !== "";
         const cr = document.createElement("div"); cr.className = "color-row";
+
         const cl = document.createElement("span"); cl.className = "color-lbl"; cl.textContent = cf.label;
-        const sw = document.createElement("input"); sw.type = "color"; sw.className = "swatch";
+
+        const sw = document.createElement("input"); sw.type = "color";
+        sw.className = "swatch" + (isSet ? "" : " unset");
         sw.value = node.color?.[cf.key] || "#888888";
-        sw.addEventListener("input", e => this._wNodeColor(idx, cf.key, e.target.value));
-        cr.appendChild(cl); cr.appendChild(sw);
+        sw.title = isSet ? "Custom override (click to change)" : "Not set — click to add override";
+
+        const clrBtn = document.createElement("button");
+        clrBtn.className = "clr-btn" + (isSet ? "" : " hidden");
+        clrBtn.textContent = "✕ clear";
+        clrBtn.title = "Remove this color override";
+
+        sw.addEventListener("input", e => {
+          sw.classList.remove("unset");
+          sw.title = "Custom override (click to change)";
+          clrBtn.classList.remove("hidden");
+          this._wNodeColor(idx, cf.key, e.target.value);
+        });
+
+        clrBtn.addEventListener("click", () => {
+          // Delete the key from node.color entirely
+          const nodes2 = [...this._config.nodes];
+          const newColor = { ...(nodes2[idx].color || {}) };
+          delete newColor[cf.key];
+          nodes2[idx] = { ...nodes2[idx], color: newColor };
+          this._config = { ...this._config, nodes: nodes2 };
+          this._fireChange();
+          // Reset swatch UI to show "unset" state
+          sw.value = "#888888";
+          sw.classList.add("unset");
+          sw.title = "Not set — click to add override";
+          clrBtn.classList.add("hidden");
+        });
+
+        cr.appendChild(cl); cr.appendChild(sw); cr.appendChild(clrBtn);
         detail.appendChild(cr);
       });
 
