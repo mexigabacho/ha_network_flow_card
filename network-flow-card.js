@@ -1106,68 +1106,42 @@ class NetworkFlowCardEditor extends HTMLElement {
       ], node.status||"online", val => this._wNodeField(idx, "status", val)));
       detail.appendChild(sg);
 
-      // Tap / hold actions
+      // Actions — use ha-selector with selector: { action: {} }
+      // This renders HA's native action picker (same as Tile/Mushroom cards)
+      // with built-in UI for entity picker, navigation path, service picker, etc.
       const actSec = document.createElement("div"); actSec.className = "subsec"; actSec.textContent = "Actions";
       detail.appendChild(actSec);
 
-      const actGrid = document.createElement("div"); actGrid.className = "two";
-      const TAP_ACTIONS = [
-        {v:"more-info", l:"More info"},
-        {v:"navigate",  l:"Navigate"},
-        {v:"url",       l:"Open URL"},
-        {v:"call-service", l:"Call service"},
-        {v:"none",      l:"None"},
+      const ACTION_DEFS = [
+        { key: "tap_action",        label: "Tap action",        def: { action: "more-info" } },
+        { key: "double_tap_action", label: "Double-tap action", def: { action: "none"      } },
+        { key: "hold_action",       label: "Hold action",       def: { action: "none"      } },
       ];
-      actGrid.appendChild(this._sel("Tap action", TAP_ACTIONS,
-        node.tap_action?.action || "more-info",
-        val => this._wNodeField(idx, "tap_action", { ...(node.tap_action||{}), action: val })
-      ));
-      actGrid.appendChild(this._sel("Hold action", TAP_ACTIONS,
-        node.hold_action?.action || "none",
-        val => this._wNodeField(idx, "hold_action", { ...(node.hold_action||{}), action: val })
-      ));
-      detail.appendChild(actGrid);
 
-      // Show entity/path/url/service field depending on tap action selected
-      const tapAction = node.tap_action?.action || "more-info";
-      if (tapAction === "more-info") {
-        const ef = document.createElement("ha-selector");
-        ef.label = "Entity (optional — defaults to status entity)";
-        ef.hass = this._hass;
-        ef.selector = { entity: {} };
-        ef.value = node.tap_action?.entity || "";
-        ef.addEventListener("value-changed", e => {
-          this._wNodeField(idx, "tap_action", { ...(node.tap_action||{action:"more-info"}), entity: e.detail.value });
+      ACTION_DEFS.forEach(ad => {
+        const wrapper = document.createElement("div");
+        wrapper.style.marginBottom = "8px";
+
+        // Label
+        const lbl = document.createElement("div");
+        lbl.style.cssText = "font-size:11px;color:var(--secondary-text-color);margin-bottom:4px;font-weight:500";
+        lbl.textContent = ad.label;
+        wrapper.appendChild(lbl);
+
+        // Use ha-selector with action selector — native HA action editor
+        const sel = document.createElement("ha-selector");
+        sel.hass = this._hass;
+        sel.selector = { action: {} };
+        sel.value = node[ad.key] || ad.def;
+
+        sel.addEventListener("value-changed", e => {
+          const val = e.detail.value;
+          this._wNodeField(idx, ad.key, val);
         });
-        detail.appendChild(ef);
-      } else if (tapAction === "navigate") {
-        const nf = document.createElement("ha-textfield");
-        nf.label = "Navigation path (e.g. /lovelace/network)";
-        nf.value = node.tap_action?.navigation_path || "";
-        nf.style.width = "100%"; nf.style.display = "block"; nf.style.marginBottom = "8px";
-        nf.addEventListener("input", e => {
-          this._wNodeField(idx, "tap_action", { ...(node.tap_action||{action:"navigate"}), navigation_path: e.target.value });
-        });
-        detail.appendChild(nf);
-      } else if (tapAction === "url") {
-        const uf = document.createElement("ha-textfield");
-        uf.label = "URL";
-        uf.value = node.tap_action?.url_path || "";
-        uf.style.width = "100%"; uf.style.display = "block"; uf.style.marginBottom = "8px";
-        uf.addEventListener("input", e => {
-          this._wNodeField(idx, "tap_action", { ...(node.tap_action||{action:"url"}), url_path: e.target.value });
-        });
-        detail.appendChild(uf);
-      } else if (tapAction === "call-service") {
-        const sf = document.createElement("ha-textfield");
-        sf.label = "Service (e.g. light.turn_on)";
-        sf.value = node.tap_action?.service || "";
-        sf.style.width = "100%"; sf.style.display = "block"; sf.style.marginBottom = "8px";
-        sf.addEventListener("input", e => {
-          this._wNodeField(idx, "tap_action", { ...(node.tap_action||{action:"call-service"}), service: e.target.value });
-        });
-        detail.appendChild(sf);
-      }
+
+        wrapper.appendChild(sel);
+        detail.appendChild(wrapper);
+      });
 
       // Per-node label position override
       const mpNodeWrap = document.createElement("div");
@@ -1492,61 +1466,141 @@ class NetworkFlowCard extends HTMLElement {
     this._renderer = new NetworkFlowRenderer(canvas, this._config, this._theme);
     this._renderer.updateStates(this._states);
     this._renderer.start();
-    canvas.addEventListener("click", e => {
-      const rect = canvas.getBoundingClientRect();
-      this._renderer.handleClick(e.clientX - rect.left, e.clientY - rect.top, "tap");
+    // Pointer-based action detection supporting tap, double-tap, and hold.
+    // Works on mouse and touch (mobile/tablet dashboards).
+    let _tapTimer = null, _tapCount = 0, _holdTimer = null, _holdFired = false;
+    const HOLD_MS = 500, DOUBLE_TAP_MS = 250;
+
+    canvas.addEventListener("pointerdown", e => {
+      _holdFired = false;
+      _holdTimer = setTimeout(() => {
+        _holdFired = true;
+        const rect = canvas.getBoundingClientRect();
+        this._renderer.handleClick(e.clientX - rect.left, e.clientY - rect.top, "hold");
+      }, HOLD_MS);
     });
-    canvas.addEventListener("contextmenu", e => {
-      e.preventDefault();
+
+    canvas.addEventListener("pointerup", e => {
+      clearTimeout(_holdTimer);
+      if (_holdFired) return; // hold already handled
       const rect = canvas.getBoundingClientRect();
-      this._renderer.handleClick(e.clientX - rect.left, e.clientY - rect.top, "hold");
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      _tapCount++;
+      if (_tapCount === 1) {
+        _tapTimer = setTimeout(() => {
+          _tapCount = 0;
+          this._renderer.handleClick(mx, my, "tap");
+        }, DOUBLE_TAP_MS);
+      } else {
+        clearTimeout(_tapTimer);
+        _tapCount = 0;
+        this._renderer.handleClick(mx, my, "double_tap");
+      }
     });
+
+    canvas.addEventListener("pointercancel", () => {
+      clearTimeout(_holdTimer); clearTimeout(_tapTimer);
+      _tapCount = 0; _holdFired = false;
+    });
+
+    // Suppress context menu so right-click doesn't show browser menu
+    canvas.addEventListener("contextmenu", e => e.preventDefault());
+
     canvas.addEventListener("node-action", e => {
       this._handleNodeAction(e.detail.node, e.detail.actionType);
     });
   }
 
-  // Handle tap/hold actions on a node.
-  // Supports the same action types as other HA cards via the standard
-  // hass-action / hass-more-info event protocol.
+  // Fire a HA event the same way the official frontend helpers do.
+  // Using window-level dispatch ensures dialogs (which are portaled to document)
+  // receive the event regardless of shadow DOM boundaries.
+  _fireHAEvent(type, detail) {
+    window.dispatchEvent(new CustomEvent(type, {
+      detail, bubbles: true, composed: true,
+    }));
+    // Also dispatch on document for older HA versions
+    document.dispatchEvent(new CustomEvent(type, {
+      detail, bubbles: true, composed: true,
+    }));
+    // And on this element for the HA event bus
+    this.dispatchEvent(new CustomEvent(type, {
+      detail, bubbles: true, composed: true,
+    }));
+  }
+
+  // Resolve which action config to use for a given action type
+  _getAction(node, actionType) {
+    switch (actionType) {
+      case "hold":       return node.hold_action       || { action: "none" };
+      case "double_tap": return node.double_tap_action || { action: "none" };
+      case "tap":
+      default:           return node.tap_action        || { action: "more-info" };
+    }
+  }
+
+  // Resolve the best entity ID for a more-info action on this node
+  _getNodeEntityId(node, action) {
+    return action.entity ||
+      node.entities?.status  ||
+      node.entities?.status2 ||
+      node.entities?.upload  ||
+      node.entities?.ip      ||
+      null;
+  }
+
   _handleNodeAction(node, actionType) {
-    const action = actionType === "hold"
-      ? (node.hold_action || { action: "none" })
-      : (node.tap_action  || { action: "more-info" });
+    const action = this._getAction(node, actionType);
 
     switch (action.action) {
       case "more-info": {
-        // Default: open more-info for the most relevant entity on this node.
-        // Prefers tap_action.entity if set, otherwise falls back through entity list.
-        const entityId = action.entity ||
-          node.entities?.status || node.entities?.upload ||
-          node.entities?.ip || null;
-        if (entityId && this._hass) {
-          this.dispatchEvent(new CustomEvent("hass-more-info", {
-            detail: { entityId },
-            bubbles: true, composed: true,
-          }));
-        }
+        const entityId = this._getNodeEntityId(node, action);
+        if (!entityId) break;
+        // Fire via all paths to ensure HA's dialog system picks it up
+        this._fireHAEvent("hass-more-info", { entityId });
         break;
       }
-      case "navigate":
-        if (action.navigation_path) {
-          window.history.pushState(null, "", action.navigation_path);
-          window.dispatchEvent(new CustomEvent("location-changed", {
-            detail: { replace: false }, bubbles: true, composed: true,
-          }));
-        }
+
+      case "navigate": {
+        const path = action.navigation_path || "/";
+        window.history.pushState(null, "", path);
+        window.dispatchEvent(new CustomEvent("location-changed", {
+          detail: { replace: false }, bubbles: true, composed: true,
+        }));
         break;
+      }
+
       case "url":
         if (action.url_path) window.open(action.url_path, action.url_target || "_blank");
         break;
-      case "call-service": {
-        if (action.service && this._hass) {
-          const [domain, service] = action.service.split(".");
-          this._hass.callService(domain, service, action.service_data || {});
+
+      case "call-service":
+      case "perform-action": {
+        // Support both legacy "call-service" and new "perform-action" naming
+        const svc = action.service || action.action_name;
+        if (svc && this._hass) {
+          const [domain, service] = svc.split(".");
+          this._hass.callService(
+            domain, service,
+            action.service_data || action.data || {},
+            action.target || {}
+          );
         }
         break;
       }
+
+      case "toggle": {
+        // Toggle the status entity if it's a switch/light/input_boolean
+        const entityId = this._getNodeEntityId(node, action);
+        if (entityId && this._hass) {
+          const domain = entityId.split(".")[0];
+          const toggleable = ["switch","light","input_boolean","automation","fan","cover"];
+          if (toggleable.includes(domain)) {
+            this._hass.callService(domain, "toggle", { entity_id: entityId });
+          }
+        }
+        break;
+      }
+
       case "none":
       default:
         break;
