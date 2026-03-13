@@ -13,7 +13,7 @@
 // ─── Icon path cache ─────────────────────────────────────────────────────────
 // Fetches SVG path data from HA's bundled MDI icon set on demand.
 // The static FALLBACK_PATHS covers the most common icons for instant first-paint.
-// Any icon not in the fallback is fetched async from /static/mdi/ and cached.
+// Any icon not in the fallback is resolved via ha-icon shadow DOM and cached.
 // Once cached, the next animation frame picks it up — no flicker, no rebuild.
 
 const _iconCache = new Map();
@@ -49,31 +49,83 @@ const FALLBACK_PATHS = {
 // Seed the cache with fallbacks so they're immediately available
 for (const [k, v] of Object.entries(FALLBACK_PATHS)) _iconCache.set(k, v);
 
-// Fetch an icon path from HA's bundled MDI data.
-// HA serves individual icon JSON at /static/mdi/<icon-name>.json
-// e.g. /static/mdi/router-network.json → { "path": "M..." }
+// Resolve an MDI icon path by rendering a hidden ha-icon element and reading
+// the SVG path from its shadow DOM. This works with any icon HA supports,
+// including all mdi:* icons, without relying on any internal HA endpoints.
+//
+// The ha-icon element handles all version differences internally — we just
+// wait for it to render, grab the <path d="..."> from its shadow root, cache
+// it, and remove the temporary element. Subsequent lookups are instant.
+
+// Off-screen container for temporary ha-icon elements
+let _iconStage = null;
+function _getIconStage() {
+  if (!_iconStage) {
+    _iconStage = document.createElement("div");
+    _iconStage.style.cssText = "position:absolute;left:-9999px;top:-9999px;width:24px;height:24px;visibility:hidden;pointer-events:none";
+    document.body.appendChild(_iconStage);
+  }
+  return _iconStage;
+}
+
 async function fetchMdiPath(mdiKey) {
   if (_iconCache.has(mdiKey)) return _iconCache.get(mdiKey);
-  if (_iconFetching.has(mdiKey)) return null; // already in flight
-  if (!mdiKey?.startsWith("mdi:")) return null;
+  if (_iconFetching.has(mdiKey)) return null;
+  if (!mdiKey) return null;
 
-  const iconName = mdiKey.slice(4); // strip "mdi:"
   _iconFetching.add(mdiKey);
 
-  try {
-    const res = await fetch(`/static/mdi/${iconName}.json`);
-    if (!res.ok) throw new Error(res.status);
-    const data = await res.json();
-    const path = data.path || data.d || null;
-    if (path) _iconCache.set(mdiKey, path);
-    return path;
-  } catch {
-    // Mark as null so we don't keep retrying a bad icon name
-    _iconCache.set(mdiKey, null);
-    return null;
-  } finally {
-    _iconFetching.delete(mdiKey);
-  }
+  return new Promise(resolve => {
+    const el = document.createElement("ha-icon");
+    el.setAttribute("icon", mdiKey);
+
+    // Poll the shadow DOM for the rendered SVG path.
+    // ha-icon renders asynchronously — the path appears after 1-3 rAF cycles.
+    let attempts = 0;
+    const maxAttempts = 40; // ~667ms at 60fps before giving up
+
+    function tryExtract() {
+      attempts++;
+
+      // Try multiple shadow DOM structures across HA versions:
+      // Modern: ha-icon → ha-svg-icon (shadow) → svg → path
+      // Older:  ha-icon (shadow) → ha-svg-icon → svg → path
+      const roots = [
+        el.shadowRoot,
+        el.shadowRoot?.querySelector("ha-svg-icon")?.shadowRoot,
+      ];
+
+      for (const root of roots) {
+        if (!root) continue;
+        const pathEl = root.querySelector("svg path[d]") ||
+                       root.querySelector("path[d]");
+        if (pathEl) {
+          const d = pathEl.getAttribute("d");
+          if (d && d.length > 5) {
+            _iconCache.set(mdiKey, d);
+            _iconFetching.delete(mdiKey);
+            el.remove();
+            resolve(d);
+            return;
+          }
+        }
+      }
+
+      if (attempts >= maxAttempts) {
+        // Give up — mark null so we don't retry every frame
+        _iconCache.set(mdiKey, null);
+        _iconFetching.delete(mdiKey);
+        el.remove();
+        resolve(null);
+        return;
+      }
+
+      requestAnimationFrame(tryExtract);
+    }
+
+    _getIconStage().appendChild(el);
+    requestAnimationFrame(tryExtract);
+  });
 }
 
 // Pre-fetch all icons used in a config so they're ready before first paint
