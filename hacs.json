@@ -1,0 +1,7 @@
+{
+  "name": "Network Flow Card",
+  "description": "Visualize your network topology with animated bidirectional upload/download flow",
+  "render_readme": true,
+  "filename": "network-flow-card.js",
+  "homeassistant": "2023.9.0"
+}

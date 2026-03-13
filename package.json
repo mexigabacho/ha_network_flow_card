@@ -1,0 +1,25 @@
+{
+  "name": "network-flow-card",
+  "version": "1.0.0",
+  "description": "Home Assistant custom card for visualizing network topology with live upload/download flow animation",
+  "keywords": ["home-assistant", "lovelace", "custom-card", "network", "flow", "hacs"],
+  "license": "MIT",
+  "homepage": "https://github.com/mexigabacho/ha_network_flow_card",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mexigabacho/ha_network_flow_card.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mexigabacho/ha_network_flow_card/issues"
+  },
+  "scripts": {
+    "build": "rollup -c rollup.config.js",
+    "watch": "rollup -c rollup.config.js --watch",
+    "dev":   "rollup -c rollup.config.js --watch"
+  },
+  "devDependencies": {
+    "rollup": "^3.29.4",
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-terser": "^0.4.4"
+  }
+}
