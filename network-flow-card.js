@@ -752,40 +752,77 @@ class NetworkFlowCardEditor extends HTMLElement {
   }
 
   // Helper: create a ha-select element ─────────────────────────────────────
+  // mwc-select / ha-select quirks:
+  //   • "selected" fires on init AND on user picks — carries the chosen index
+  //     via e.detail.index, but sel.value may not be updated yet at that point.
+  //     We read the value directly from the mwc-list-item at that index instead.
+  //   • "closed" fires after the menu animates shut — by this point sel.value
+  //     IS reliable, but we've already captured the pending value from "selected".
+  //   • sel.value setter is async — always set via requestAnimationFrame.
+  //   • "opened" is reliable and fires before any selection.
 
   _sel(label, options, current, onChange) {
     const sel = document.createElement("ha-select");
     sel.label = label;
+    const items = [];
     options.forEach(o => {
       const item = document.createElement("mwc-list-item");
-      item.value = o.v; item.textContent = o.l;
+      item.value = o.v;
+      item.textContent = o.l;
+      items.push(item);
       sel.appendChild(item);
     });
-    // Set initial value after element upgrades
+
+    // Set initial value after the element upgrades its internal mwc-list
     requestAnimationFrame(() => { sel.value = current; });
 
-    // Track when the dropdown opens so we can suppress setConfig() redraws
+    // Track open state to block setConfig() round-trip redraws
     sel.addEventListener("opened", () => {
       this._interacting = true;
       clearTimeout(this._interactTimer);
+      sel._pendingValue = null; // reset any stale pending pick
     });
 
-    // "closed" fires only when the mwc-menu closes — either after a user pick
-    // or when dismissed. Reading value here gives the post-selection value.
-    sel.addEventListener("closed", () => {
-      const newVal = sel.value;
-      // Clear the interaction lock after a short delay so the HA config-changed
-      // round-trip (setConfig callback) completes before we allow syncs again
-      this._interactTimer = setTimeout(() => { this._interacting = false; }, 300);
-      if (newVal && newVal !== sel.dataset.lastVal) {
-        sel.dataset.lastVal = newVal;
-        onChange(newVal);
+    // "selected" fires for every pick including init — guard with _userOpened
+    // and read the value from the item directly (sel.value is stale here)
+    sel.addEventListener("selected", e => {
+      if (!this._interacting) return; // ignore init-time firing
+      const idx = e.detail?.index;
+      if (idx !== undefined && idx >= 0 && items[idx]) {
+        sel._pendingValue = items[idx].value;
       }
     });
 
-    // Seed lastVal so the closed handler has a baseline to diff against
-    sel.dataset.lastVal = current;
+    // "closed" fires after the menu shuts — sel.value is now reliable.
+    // Prefer _pendingValue (captured from "selected") as the source of truth;
+    // fall back to sel.value if _pendingValue wasn't set (dismissed without pick).
+    sel.addEventListener("closed", () => {
+      // Release interaction lock after the HA config-changed round-trip settles
+      this._interactTimer = setTimeout(() => { this._interacting = false; }, 350);
+
+      const picked = sel._pendingValue;
+      sel._pendingValue = null;
+
+      // Only fire if the user actually chose something new
+      if (picked !== null && picked !== undefined && picked !== sel.dataset.currentVal) {
+        sel.dataset.currentVal = picked;
+        // Re-apply the value to keep the displayed label correct after
+        // HA's setConfig round-trip may have tried to reset it
+        requestAnimationFrame(() => { sel.value = picked; });
+        onChange(picked);
+      }
+    });
+
+    // Seed currentVal so we can diff on every closed event
+    sel.dataset.currentVal = current;
     return sel;
+  }
+
+  // Called by _rebuildNodes/_rebuildLinks when config changes externally —
+  // updates a select's displayed value without triggering onChange
+  _setSelValue(sel, val) {
+    sel.dataset.currentVal = val;
+    requestAnimationFrame(() => { sel.value = val; });
   }
 }
 customElements.define("network-flow-card-editor", NetworkFlowCardEditor);
