@@ -994,8 +994,6 @@ class NetworkFlowCardEditor extends HTMLElement {
     }
 
     // ha-selector entity pickers — compare before writing
-    // Only sync selectors that have data attributes (entity bindings)
-    // Action selectors (no data attrs) are managed by their own value-changed
     sr.querySelectorAll("ha-selector[data-node-idx]").forEach(sel => {
       if (sel._pendingInteraction) return;
       const nodeIdx = parseInt(sel.dataset.nodeIdx);
@@ -1003,6 +1001,22 @@ class NetworkFlowCardEditor extends HTMLElement {
       if (!isNaN(nodeIdx) && ek) {
         const v = this._config.nodes[nodeIdx]?.entities?.[ek] || "";
         if (sel.value !== v) sel.value = v;
+      }
+    });
+
+    // Action selectors — sync programmatically without triggering value-changed
+    sr.querySelectorAll("ha-selector[data-action-key]").forEach(sel => {
+      if (this._interacting) return;
+      const nodeIdx = parseInt(sel.dataset.actionNodeIdx);
+      const key = sel.dataset.actionKey;
+      if (isNaN(nodeIdx) || !key) return;
+      const node = this._config.nodes[nodeIdx];
+      if (!node) return;
+      const newVal = node[key];
+      if (newVal && JSON.stringify(sel.value) !== JSON.stringify(newVal)) {
+        sel._settingProgrammatic = true;
+        sel.value = newVal;
+        requestAnimationFrame(() => { sel._settingProgrammatic = false; });
       }
     });
   }
@@ -1176,22 +1190,47 @@ class NetworkFlowCardEditor extends HTMLElement {
         const wrapper = document.createElement("div");
         wrapper.style.marginBottom = "8px";
 
-        // Label
         const lbl = document.createElement("div");
         lbl.style.cssText = "font-size:11px;color:var(--secondary-text-color);margin-bottom:4px;font-weight:500";
         lbl.textContent = ad.label;
         wrapper.appendChild(lbl);
 
-        // Use ha-selector with action selector — native HA action editor
         const sel = document.createElement("ha-selector");
         sel.hass = this._hass;
         sel.selector = { action: {} };
-        sel.value = node[ad.key] || ad.def;
 
-        sel.addEventListener("value-changed", e => {
-          const val = e.detail.value;
-          this._wNodeField(idx, ad.key, val);
+        // Guard: suppress value-changed events fired during construction/upgrade.
+        // ha-selector fires value-changed when .value is set programmatically,
+        // and again when the component internally upgrades. We only want user changes.
+        let _ready = false;
+        requestAnimationFrame(() => {
+          // Set value after one frame so the element is fully upgraded first
+          sel._settingProgrammatic = true;
+          sel.value = node[ad.key] || ad.def;
+          requestAnimationFrame(() => {
+            sel._settingProgrammatic = false;
+            _ready = true;
+          });
         });
+
+        // Debounce: action selector fires value-changed on every sub-field
+        // keystroke (entity ID typing, service name, etc.).
+        // Debounce to 400ms so we don't call setConfig on every character.
+        let _actionTimer = null;
+        sel.addEventListener("value-changed", e => {
+          if (sel._settingProgrammatic || !_ready) return;
+          const val = e.detail.value;
+          // Write to config immediately (no DOM change) but debounce the fire
+          const nodes2 = [...this._config.nodes];
+          nodes2[idx] = { ...nodes2[idx], [ad.key]: val };
+          this._config = { ...this._config, nodes: nodes2 };
+          clearTimeout(_actionTimer);
+          _actionTimer = setTimeout(() => this._fireChange(), 400);
+        });
+
+        // Data attributes allow _syncValues to find and update these selectors
+        sel.dataset.actionKey = ad.key;
+        sel.dataset.actionNodeIdx = idx;
 
         wrapper.appendChild(sel);
         detail.appendChild(wrapper);
